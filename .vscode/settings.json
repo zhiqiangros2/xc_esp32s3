@@ -1,0 +1,15 @@
+{
+  "idf.currentSetup": "D:/worksoft/Espressif/frameworks/esp-idf-v5.5.5",
+  "idf.flashType": "UART",
+  "idf.monitorPort": "COM4",
+  "idf.customExtraVars": {
+    "IDF_PATH": "D:/worksoft/Espressif/frameworks/esp-idf-v5.5.5",
+    "IDF_TOOLS_PATH": "D:/worksoft/Espressif",
+    "IDF_PYTHON_ENV_PATH": "D:/worksoft/Espressif/python_env/idf5.5_py3.11_env",
+    "IDF_TARGET": "esp32s3"
+  },
+  "idf.openOcdConfigs": [
+    "board/esp32s3-builtin.cfg"
+  ],
+  "idf.port": "COM4"
+}

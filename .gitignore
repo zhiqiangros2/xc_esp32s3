@@ -1,0 +1,5 @@
+/build/
+/.ccache/
+/sdkconfig
+/sdkconfig.old
+/debug.log
