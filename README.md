@@ -1,11 +1,11 @@
-# 正点原子 DNESP32S3 BOX3 Hello World
+# 正点原子 DNESP32S3 BOX3 板级功能示例
 
 这是一个基于 ESP-IDF 5.5 的最小示例工程，适用于正点原子
 `ATK-DNESP32S3B3 V1`（BOX3）开发板。
 
 程序启动后会检测 Flash 和 PSRAM 容量，执行一次 1 MiB PSRAM 写入/读回测试，
-初始化 AW9523B 扩展 GPIO，启用 K0 按键中断，然后每隔五秒通过 USB 串口
-输出一条 Hello World 日志。
+初始化 AW9523B 扩展 GPIO 和板载 2.4 英寸 LCD，在屏幕上显示测试色条，启用
+K0/K1/K2 按键中断，然后每隔五秒通过 USB 串口输出一条运行日志。
 
 ## 硬件配置
 
@@ -16,13 +16,17 @@
 | Flash | BY25Q128ES，16 MiB Quad SPI，80 MHz |
 | K0 按键 | GPIO0，上拉输入，按下为低电平 |
 | AW9523B | I2C0，SCL=GPIO2，SDA=GPIO3，地址 `0x59`，INT=GPIO42 |
+| LCD | ST7789V2，320×240，SPI2：SCLK=GPIO15、MOSI=GPIO16、MISO=GPIO17、CS=GPIO47、DC=GPIO48；RESX 与 CHIP_PU 共用复位网络 |
+| LCD 背光 | AW9523B P1_0，低电平点亮 |
 | 外接触摸屏 | CHSC5432，地址 `0x2E`，INT 与 AW9523B 共用 GPIO42（当前未接） |
 | 下载与日志 | Type-C 原生 USB，GPIO19/GPIO20 |
 | 开发板型号 | ATK-DNESP32S3B3 V1 |
 
 配置依据见 `pdf` 目录中的
 [ATK_DNESP32S3B3_V1.0.pdf](./pdf/ATK_DNESP32S3B3_V1.0.pdf) 和
-[AW9523BTQR.pdf](./pdf/AW9523BTQR.pdf)。
+[AW9523BTQR.pdf](./pdf/AW9523BTQR.pdf)，LCD 控制器配置另参考
+[ST7789.pdf](./pdf/ST7789.pdf) 和
+[正点原子 BOX3 SPI-LCD 实验](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/lcd/)。
 
 板载红蓝双色 LED 并未直接连接 ESP32-S3 GPIO，而是连接在 AW9523B IO
 扩展芯片的 P1_1 和 P1_2 上。本示例初始化 AW9523B、校验芯片 ID、配置端口
@@ -35,6 +39,7 @@
 - 检测实际 PSRAM 容量，期望值为 8 MiB。
 - 从 PSRAM 分配 1 MiB 缓冲区并完成写入、读回校验。
 - 初始化 AW9523B 独立驱动，并验证 ID 寄存器值为 `0x23`。
+- 初始化 ST7789V2 LCD，在 320×240 横屏模式下显示八色测试图。
 - 通过 GPIO42 共享中断管理器查询 AW9523B；K1/K2 分别切换红灯/蓝灯。
 - GPIO42 使用标志位选择处理模块；AW9523B 对应 `0x0001`。
 - 使用 GPIO0 下降沿中断检测 K0，任务中进行 20 ms 消抖；每次按下打印一次日志。
@@ -96,6 +101,28 @@ GPIO42。`interrupt_manager.c/.h` 独占该 GPIO 的 ISR；ISR 只通知 FreeRTO
 本示例固定使能 P0 上 K1 和 K2 的 AW9523B 中断，P0 其余引脚及整个 P1 保持屏蔽。
 中断处理读取 P0 输入寄存器 `0x00` 释放 INTN，并按 20 ms 时间窗过滤按键抖动。
 
+### LCD 驱动
+
+`spi.c/.h` 负责 SPI2 总线初始化、板级引脚和 DMA 内存管理；`lcd.c/.h` 使用
+ESP-IDF 的 `esp_lcd` ST7789 驱动。屏幕以 60 MHz、SPI 模式 0 工作，逻辑分辨率
+固定为 320×240 横屏。LCD 的 RESX 通过 `ESP_LCD_RESET` 网络与 ESP32-S3 的
+`CHIP_PU` 共用，不能作为独立 GPIO 控制，因此面板驱动使用 ST7789 软件复位；背光
+通过 AW9523B P1_0 控制，并按低电平有效逻辑封装为 `lcd_backlight_set()`。
+
+驱动使用 20 行 DMA 暂存区分块刷新，并等待每次异步 SPI 传输完成后才复用缓冲区。
+`lcd_draw_bitmap()` 接收 CPU 原生字节序的 RGB565 `uint16_t` 像素，内部会转换为
+ST7789 所需的大端线上字节序。区域必须完全位于屏幕范围内，越界或空区域返回
+`ESP_ERR_INVALID_ARG`。
+
+可用接口：
+
+- `lcd_init()`：初始化 SPI2、ST7789V2 和背光，重复调用安全。
+- `lcd_backlight_set()`：打开或关闭背光。
+- `lcd_clear()`：使用一个 RGB565 颜色清屏。
+- `lcd_fill_rect()`：填充指定矩形区域。
+- `lcd_draw_bitmap()`：显示行优先 RGB565 位图。
+- `lcd_show_test_pattern()`：显示八色竖向测试条。
+
 ## 工程结构
 
 ```text
@@ -109,16 +136,21 @@ xc_esp32s3/
 |   |   |-- aw9523b.h
 |   |   |-- i2c.h
 |   |   |-- interrupt_manager.h
-|   |   `-- key_interrupt.h
+|   |   |-- key_interrupt.h
+|   |   |-- lcd.h
+|   |   `-- spi.h
 |   `-- src/
 |       |-- aw9523b.c
 |       |-- i2c.c
 |       |-- interrupt_manager.c
-|       `-- key_interrupt.c
+|       |-- key_interrupt.c
+|       |-- lcd.c
+|       `-- spi.c
 |-- README.md
 `-- pdf/
     |-- ATK_DNESP32S3B3_V1.0.pdf
-    `-- AW9523BTQR.pdf
+    |-- AW9523BTQR.pdf
+    `-- ST7789.pdf
 ```
 
 `sdkconfig.defaults` 已设置：
@@ -247,11 +279,13 @@ Chip: esp32s3, 2 core(s), revision <版本号>
 Flash: 16 MiB
 PSRAM: 8 MiB total, <可用容量> KiB free
 I (...) BOX3: 1 MiB PSRAM read/write test: PASS
+I (...) KEY: K0 interrupt ready on GPIO0
 I (...) I2C: I2C0 ready: SCL=GPIO2, SDA=GPIO3
 I (...) AW9523B: Ready: address=0x59, ID=0x23
-I (...) KEY: K0 interrupt ready on GPIO0
 I (...) AW9523B: INTN ready, P0 mask=0x03, P1 mask=0x00
 I (...) INT_MGR: Shared interrupt ready on GPIO42, flags=0x0001
+I (...) SPI: SPI2 ready: SCLK=15, MOSI=16, MISO=17, max transfer=12800 bytes
+I (...) LCD: ST7789V2 ready: 320x240, SPI2 60 MHz, CS=47, DC=48
 I (...) BOX3: Hello World - uptime: 0 s
 I (...) KEY: K0 pressed
 I (...) BOX3: K1 pressed, red LED on

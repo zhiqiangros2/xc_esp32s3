@@ -14,6 +14,7 @@
 #include "i2c.h"
 #include "interrupt_manager.h"
 #include "key_interrupt.h"
+#include "lcd.h"
 
 #define BYTES_PER_MIB (1024U * 1024U)
 
@@ -91,6 +92,10 @@ void app_main(void)
 
     /* flag=0x0001：GPIO42 触发后调用 AW9523B 模块处理中断。 */
     ESP_ERROR_CHECK(interrupt_manager_init(INTERRUPT_SOURCE_AW9523B));
+
+    /* 基础外设就绪后初始化 LCD，并显示硬件测试色条。 */
+    ESP_ERROR_CHECK(lcd_init());
+    ESP_ERROR_CHECK(lcd_show_test_pattern());
 
     uint32_t seconds = 0;
     while (true) {
