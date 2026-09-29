@@ -6,24 +6,28 @@
 #include "driver/spi_master.h"
 #include "esp_err.h"
 
+#define BOARD_SPI_MAX_TRANSFER_SIZE (16U * 1024U) /* SPI2 单次 DMA 传输上限。 */
+
 /**
- * @brief Initialize the BOX3 SPI2 master bus.
+ * @brief 初始化 BOX3 板的 SPI2 主机总线。
  *
- * The board wiring is SCLK=GPIO15, MOSI=GPIO16 and MISO=GPIO17. The first
- * caller specifies the largest DMA transaction required on the bus.
+ * 板上 SPI2 引脚为 SCLK=GPIO15、MOSI=GPIO16、MISO=GPIO17。LCD 和 SD
+ * 共用这些信号线，但分别使用独立的片选引脚。应用程序应在 main.c 中先调用
+ * 本函数，再初始化 LCD 或 SD；重复调用不会重复创建总线。
+ * max_transfer_size 必须不超过 BOARD_SPI_MAX_TRANSFER_SIZE。
  */
 esp_err_t board_spi_init(size_t max_transfer_size);
 
-/** Return the ESP-IDF host identifier for the initialized board SPI bus. */
+/** 返回已经初始化的 SPI2 主机编号，供 LCD 和 SD 配置设备时使用。 */
 spi_host_device_t board_spi_get_host(void);
 
-/** Allocate internal DMA-capable memory for a board SPI transaction. */
+/** 分配可用于 SPI2 DMA 传输的片内内存。 */
 void *board_spi_dma_alloc(size_t size);
 
-/** Release memory returned by board_spi_dma_alloc(). */
+/** 释放 board_spi_dma_alloc() 分配的内存。 */
 void board_spi_dma_free(void *memory);
 
-/** Release SPI2 when it was initialized by board_spi_init(). */
+/** 应用程序不再使用 LCD 和 SD 后，释放 SPI2 总线。 */
 esp_err_t board_spi_deinit(void);
 
 #endif

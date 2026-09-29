@@ -171,7 +171,6 @@ static void lcd_release_resources(void)
         board_spi_dma_free(lcd_transfer_buffer);
         lcd_transfer_buffer = NULL;
     }
-    board_spi_deinit();
     if (lcd_dma_done_semaphore != NULL) {
         vSemaphoreDelete(lcd_dma_done_semaphore);
         lcd_dma_done_semaphore = NULL;
@@ -185,7 +184,7 @@ static void lcd_release_resources(void)
 /**
  * @brief 初始化板载 ST7789V2 LCD。
  *
- * 调用前必须先初始化 I2C 和 AW9523B。函数会依次关闭背光、初始化 SPI2、
+ * 调用前必须先初始化 I2C、AW9523B 和 SPI2。函数会依次关闭背光、
  * 创建 LCD 面板、配置 X=240/Y=320 原生坐标、清屏并重新打开背光；重复调用安全。
  */
 esp_err_t lcd_init(void)
@@ -208,14 +207,6 @@ esp_err_t lcd_init(void)
     if (lcd_mutex == NULL || lcd_dma_done_semaphore == NULL) {
         lcd_release_resources();
         return ESP_ERR_NO_MEM;
-    }
-
-    /* 按 20 行 RGB565 像素所需空间初始化 SPI2 的最大单次传输长度。 */
-    result = board_spi_init(LCD_TRANSFER_BUFFER_PIXELS * sizeof(uint16_t));
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize SPI2: %s", esp_err_to_name(result));
-        lcd_release_resources();
-        return result;
     }
 
     /* 分配片内 DMA 缓冲区，填充和位图绘制均通过该缓冲区分块发送。 */

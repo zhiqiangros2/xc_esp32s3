@@ -11,18 +11,21 @@
 #define BOARD_SPI_SCLK_GPIO GPIO_NUM_15
 #define BOARD_SPI_MOSI_GPIO GPIO_NUM_16
 #define BOARD_SPI_MISO_GPIO GPIO_NUM_17
-
 static const char *TAG = "SPI";
-static bool initialized = false;
-static bool bus_owned = false;
+static bool spi2_initialized = false;
+static bool spi2_bus_owned = false;
 
 esp_err_t board_spi_init(size_t max_transfer_size)
 {
-    if (initialized) {
-        return ESP_OK;
-    }
-    if (max_transfer_size == 0 || max_transfer_size > INT_MAX) {
+    if (max_transfer_size == 0 ||
+        max_transfer_size > BOARD_SPI_MAX_TRANSFER_SIZE ||
+        max_transfer_size > INT_MAX) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* LCD 和 SD 都使用同一条已经初始化的 SPI2，总线只创建一次。 */
+    if (spi2_initialized) {
+        return ESP_OK;
     }
 
     const spi_bus_config_t bus_config = {
@@ -31,28 +34,32 @@ esp_err_t board_spi_init(size_t max_transfer_size)
         .sclk_io_num = BOARD_SPI_SCLK_GPIO,
         .quadwp_io_num = GPIO_NUM_NC,
         .quadhd_io_num = GPIO_NUM_NC,
-        /* 单次 SPI DMA 事务允许传输的最大字节数。 */
-        .max_transfer_sz = (int)max_transfer_size,
+        /*
+         * 使用固定的总线级上限，使 LCD 和 SD 无论谁先初始化，都能满足
+         * 之后加入总线的另一个设备，不受第一次调用参数大小影响。
+         */
+        .max_transfer_sz = BOARD_SPI_MAX_TRANSFER_SIZE,
     };
 
     esp_err_t result = spi_bus_initialize(BOARD_SPI_HOST,
                                            &bus_config,
                                            SPI_DMA_CH_AUTO);
     if (result == ESP_OK) {
-        bus_owned = true;
+        spi2_bus_owned = true;
     } else if (result == ESP_ERR_INVALID_STATE) {
-        bus_owned = false;
+        /* 总线可能已由其他板级模块创建，复用它但不负责释放。 */
+        spi2_bus_owned = false;
     } else {
         return result;
     }
 
-    initialized = true;
+    spi2_initialized = true;
     ESP_LOGI(TAG,
              "SPI2 ready: SCLK=%d, MOSI=%d, MISO=%d, max transfer=%u bytes",
              BOARD_SPI_SCLK_GPIO,
              BOARD_SPI_MOSI_GPIO,
              BOARD_SPI_MISO_GPIO,
-             (unsigned int)max_transfer_size);
+             (unsigned int)BOARD_SPI_MAX_TRANSFER_SIZE);
     return ESP_OK;
 }
 
@@ -63,7 +70,7 @@ spi_host_device_t board_spi_get_host(void)
 
 void *board_spi_dma_alloc(size_t size)
 {
-    if (!initialized || size == 0) {
+    if (!spi2_initialized || size == 0) {
         return NULL;
     }
 
@@ -80,18 +87,18 @@ void board_spi_dma_free(void *memory)
 
 esp_err_t board_spi_deinit(void)
 {
-    if (!initialized) {
+    if (!spi2_initialized) {
         return ESP_OK;
     }
 
-    if (bus_owned) {
+    if (spi2_bus_owned) {
         esp_err_t result = spi_bus_free(BOARD_SPI_HOST);
         if (result != ESP_OK) {
             return result;
         }
     }
 
-    initialized = false;
-    bus_owned = false;
+    spi2_initialized = false;
+    spi2_bus_owned = false;
     return ESP_OK;
 }

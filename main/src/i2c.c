@@ -1,7 +1,6 @@
 #include "i2c.h"
 
 #include <stdbool.h>
-#include <stdlib.h>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -13,52 +12,53 @@
 #define BOARD_I2C_SCL_GPIO GPIO_NUM_2
 #define BOARD_I2C_SDA_GPIO GPIO_NUM_3
 
-struct board_i2c_device {
-    i2c_master_dev_handle_t handle;
-};
-
 static const char *TAG = "I2C";
-static i2c_master_bus_handle_t bus_handle = NULL;
+static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static SemaphoreHandle_t i2c_bus_mutex = NULL;
-static bool initialized = false;
+static bool i2c_bus_owned = false;
+static bool i2c_initialized = false;
 
 esp_err_t board_i2c_init(void)
 {
-    if (initialized) {
+    if (i2c_initialized) {
         return ESP_OK;
     }
 
-    esp_err_t result = i2c_master_get_bus_handle(BOARD_I2C_PORT, &bus_handle);
-    if (result == ESP_ERR_INVALID_STATE) {
-        const i2c_master_bus_config_t bus_config = {
-            .i2c_port = BOARD_I2C_PORT,
-            .sda_io_num = BOARD_I2C_SDA_GPIO,
-            .scl_io_num = BOARD_I2C_SCL_GPIO,
-            .clk_source = I2C_CLK_SRC_DEFAULT,
-            .glitch_ignore_cnt = 7,
-            .intr_priority = 0,
-            .trans_queue_depth = 0,
-            .flags.enable_internal_pullup = true,
-        };
+    const i2c_master_bus_config_t bus_config = {
+        .i2c_port = BOARD_I2C_PORT,
+        .sda_io_num = BOARD_I2C_SDA_GPIO,
+        .scl_io_num = BOARD_I2C_SCL_GPIO,
+        /* 使用 ESP-IDF 默认的 I2C 外设时钟源。 */
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        /* 忽略持续时间不超过 7 个采样周期的 SDA/SCL 毛刺脉冲。 */
+        .glitch_ignore_cnt = 7,
+        /* 使用默认中断优先级，由 ESP-IDF 自动选择合适的优先级。 */
+        .intr_priority = 0,
+        /* 不创建异步事务队列，设备访问采用同步方式完成。 */
+        .trans_queue_depth = 0,
+        /* 启用芯片内部上拉；实际硬件仍建议使用外部 I2C 上拉电阻。 */
+        .flags.enable_internal_pullup = true,
+    };
 
-        result = i2c_new_master_bus(&bus_config, &bus_handle);
-        if (result != ESP_OK) {
-            bus_handle = NULL;
-            return result;
-        }
-    } else if (result != ESP_OK) {
-        bus_handle = NULL;
+    /* 本工程由 board_i2c_init() 统一创建 I2C0，不先调用 getter 探测总线。 */
+    esp_err_t result = i2c_new_master_bus(&bus_config, &i2c_bus_handle);
+    if (result != ESP_OK) {
+        i2c_bus_handle = NULL;
         return result;
     }
+    i2c_bus_owned = true;
 
     i2c_bus_mutex = xSemaphoreCreateMutex();
     if (i2c_bus_mutex == NULL) {
-        i2c_del_master_bus(bus_handle);
-        bus_handle = NULL;
+        if (i2c_bus_owned) {
+            i2c_del_master_bus(i2c_bus_handle);
+        }
+        i2c_bus_handle = NULL;
+        i2c_bus_owned = false;
         return ESP_ERR_NO_MEM;
     }
 
-    initialized = true;
+    i2c_initialized = true;
     ESP_LOGI(TAG, "I2C0 ready: SCL=GPIO2, SDA=GPIO3");
     return ESP_OK;
 }
@@ -67,7 +67,7 @@ esp_err_t board_i2c_add_device(uint16_t device_address,
                                uint32_t clock_speed_hz,
                                board_i2c_device_handle_t *device)
 {
-    if (!initialized) {
+    if (!i2c_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
     if (device == NULL || device_address > 0x7F || clock_speed_hz == 0) {
@@ -75,11 +75,6 @@ esp_err_t board_i2c_add_device(uint16_t device_address,
     }
 
     *device = NULL;
-    board_i2c_device_handle_t new_device = calloc(1, sizeof(*new_device));
-    if (new_device == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
     const i2c_device_config_t device_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = device_address,
@@ -88,16 +83,9 @@ esp_err_t board_i2c_add_device(uint16_t device_address,
         .flags.disable_ack_check = false,
     };
 
-    esp_err_t result = i2c_master_bus_add_device(bus_handle,
-                                                  &device_config,
-                                                  &new_device->handle);
-    if (result != ESP_OK) {
-        free(new_device);
-        return result;
-    }
-
-    *device = new_device;
-    return ESP_OK;
+    return i2c_master_bus_add_device(i2c_bus_handle,
+                                     &device_config,
+                                     device);
 }
 
 esp_err_t board_i2c_remove_device(board_i2c_device_handle_t device)
@@ -106,11 +94,34 @@ esp_err_t board_i2c_remove_device(board_i2c_device_handle_t device)
         return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t result = i2c_master_bus_rm_device(device->handle);
-    if (result == ESP_OK) {
-        free(device);
+    return i2c_master_bus_rm_device(device);
+}
+
+esp_err_t board_i2c_deinit(void)
+{
+    if (!i2c_initialized) {
+        return ESP_OK;
     }
-    return result;
+
+    /*
+     * i2c_del_master_bus() 会检查总线上是否仍有设备。AW9523B 或触摸设备
+     * 尚未调用 board_i2c_remove_device() 时，直接返回错误并保留当前状态。
+     */
+    if (i2c_bus_owned) {
+        esp_err_t result = i2c_del_master_bus(i2c_bus_handle);
+        if (result != ESP_OK) {
+            return result;
+        }
+    }
+
+    if (i2c_bus_mutex != NULL) {
+        vSemaphoreDelete(i2c_bus_mutex);
+        i2c_bus_mutex = NULL;
+    }
+    i2c_bus_handle = NULL;
+    i2c_bus_owned = false;
+    i2c_initialized = false;
+    return ESP_OK;
 }
 
 esp_err_t board_i2c_transmit(board_i2c_device_handle_t device,
@@ -123,7 +134,7 @@ esp_err_t board_i2c_transmit(board_i2c_device_handle_t device,
     }
 
     xSemaphoreTake(i2c_bus_mutex, portMAX_DELAY);
-    esp_err_t result = i2c_master_transmit(device->handle,
+    esp_err_t result = i2c_master_transmit(device,
                                            data,
                                            data_size,
                                            timeout_ms);
@@ -144,7 +155,7 @@ esp_err_t board_i2c_transmit_receive(board_i2c_device_handle_t device,
     }
 
     xSemaphoreTake(i2c_bus_mutex, portMAX_DELAY);
-    esp_err_t result = i2c_master_transmit_receive(device->handle,
+    esp_err_t result = i2c_master_transmit_receive(device,
                                                     write_data,
                                                     write_size,
                                                     read_data,

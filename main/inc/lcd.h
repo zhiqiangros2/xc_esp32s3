@@ -20,23 +20,24 @@
 #define LCD_COLOR_LGRAY 0xC618U   /* 浅灰色 */
 
 /**
- * @brief Initialize the BOX3 2.4-inch ST7789V2 LCD.
+ * @brief 初始化 BOX3 的 2.4 英寸 ST7789V2 LCD。
  *
- * board_i2c_init() and aw9523b_init() must be called first because the LCD
- * backlight is controlled by AW9523B P1_0. Calling this function more than
- * once is safe. The origin is at the physical lower-left corner: X is the
- * 240-pixel vertical axis and Y is the 320-pixel horizontal axis.
+ * 调用本函数前必须先完成 board_i2c_init()、aw9523b_init() 和
+ * board_spi_init()。LCD 背光由 AW9523B 的 P1_0 控制。本函数允许重复调用。
+ * 当前显示坐标原点位于屏幕物理左下角：X 轴是 240 像素的竖直方向，Y 轴是
+ * 320 像素的水平方向。
  */
 esp_err_t lcd_init(void);
 
-/** Turn the active-low LCD backlight output on or off. */
+/** 设置 LCD 背光开关。背光输出为低电平有效。 */
 esp_err_t lcd_backlight_set(bool on);
 
-/** Fill the complete display with one RGB565 color. */
+/** 使用一种 RGB565 颜色填充整个 LCD 屏幕。 */
 esp_err_t lcd_clear(uint16_t color);
 
 /**
- * Fill a rectangle. height extends along +X; width extends along +Y.
+ * 填充一个矩形区域。
+ * height 表示沿 X 轴方向的长度，width 表示沿 Y 轴方向的长度。
  */
 esp_err_t lcd_fill_rect(uint16_t x,
                         uint16_t y,
@@ -45,8 +46,8 @@ esp_err_t lcd_fill_rect(uint16_t x,
                         uint16_t color);
 
 /**
- * Draw RGB565 pixels. For each Y position, pixels contains height consecutive
- * pixels along the X axis.
+ * 绘制 RGB565 像素数据。
+ * 对于每一个 Y 位置，pixels 中连续保存 height 个沿 X 轴排列的像素。
  */
 esp_err_t lcd_draw_pixels(uint16_t x,
                           uint16_t y,

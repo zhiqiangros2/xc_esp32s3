@@ -4,7 +4,7 @@
 `ATK-DNESP32S3B3 V1`（BOX3）开发板。
 
 程序启动后会检测 Flash 和 PSRAM 容量，执行一次 1 MiB PSRAM 写入/读回测试，
-初始化 AW9523B 扩展 GPIO、板载 2.4 英寸 LCD 和外接 CHSC5432 电容触摸屏，
+初始化 AW9523B 扩展 GPIO、板载 2.4 英寸 LCD、microSD 卡和外接 CHSC5432 电容触摸屏，
 在屏幕上显示测试色条，启用 K0/K1/K2 与触摸中断，然后每隔五秒通过 USB
 串口输出一条运行日志。
 
@@ -19,6 +19,7 @@
 | AW9523B | I2C0，SCL=GPIO2，SDA=GPIO3，地址 `0x59`，INT=GPIO42 |
 | LCD | ST7789V2，320×240，SPI2：SCLK=GPIO15、MOSI=GPIO16、MISO=GPIO17、CS=GPIO47、DC=GPIO48；RESX 与 CHIP_PU 共用复位网络 |
 | LCD 背光 | AW9523B P1_0，低电平点亮 |
+| microSD | 与 LCD 共用 SPI2 的 SCLK/MOSI/MISO，独立 CS=GPIO18，FATFS 挂载点 `/sdcard` |
 | 外接触摸屏 | CHSC5432，I2C 地址 `0x2E`，INT 与 AW9523B 共用 GPIO42，RESET=AW9523B P1_7 |
 | 下载与日志 | Type-C 原生 USB，GPIO19/GPIO20 |
 | 开发板型号 | ATK-DNESP32S3B3 V1 |
@@ -28,6 +29,7 @@
 [AW9523BTQR.pdf](./pdf/AW9523BTQR.pdf)，LCD 控制器配置另参考
 [ST7789.pdf](./pdf/ST7789.pdf)、[CHSC5xxx.pdf](./pdf/CHSC5xxx.pdf)、
 [正点原子 BOX3 SPI-LCD 实验](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/lcd/)
+、[正点原子 BOX3 SD 卡实验](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/sd_card/)
 和[正点原子 BOX3 触摸实验](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/touch/)。
 
 板载红蓝双色 LED 并未直接连接 ESP32-S3 GPIO，而是连接在 AW9523B IO
@@ -42,6 +44,7 @@
 - 从 PSRAM 分配 1 MiB 缓冲区并完成写入、读回校验。
 - 初始化 AW9523B 独立驱动，并验证 ID 寄存器值为 `0x23`。
 - 初始化 ST7789V2 LCD，以左下角为原点、Y 为物理横轴显示八色测试图。
+- 通过与 LCD 共用的 SPI2 挂载 microSD FATFS；未插卡或挂载失败不会触发重启。
 - 初始化 CHSC5432，读取芯片 ID，并通过 GPIO42 中断输出最多 5 个触点坐标。
 - 通过 GPIO42 共享中断管理器查询 AW9523B；K1/K2 分别切换红灯/蓝灯。
 - GPIO42 使用标志位选择处理模块；AW9523B 对应 `0x0001`，触摸对应 `0x0002`。
@@ -118,13 +121,25 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动并提供基础绘图接口；`display.c/.h` 
 
 可用接口：
 
-- `lcd_init()`：初始化 SPI2、ST7789V2 和背光，重复调用安全。
+- `lcd_init()`：在已初始化的 SPI2 上初始化 ST7789V2 和背光，重复调用安全。
 - `lcd_backlight_set()`：打开或关闭背光。
 - `lcd_clear()`：使用一个 RGB565 颜色清除整个屏幕。
 - `lcd_fill_rect()`：填充指定矩形区域。
 - `lcd_show_char()`：显示一个可打印 ASCII 字符。
 - `lcd_show_string()`：在指定矩形区域内显示 ASCII 字符串。
 - `lcd_show_test_pattern()`：显示八色竖向测试条。
+
+### SD 卡驱动
+
+`sd.c/.h` 使用 ESP-IDF SDSPI 和 FATFS 驱动板载 microSD 卡。SD 与 LCD 共用
+SPI2 的 GPIO15/GPIO16/GPIO17，由 SPI 主机驱动自动串行化两个设备的事务；LCD
+使用 GPIO47 片选，SD 使用 GPIO18 片选。`main.c` 先调用一次
+`board_spi_init()`，LCD 和 SD 随后分别把自己的设备加入这条共享总线。
+
+`sd_init()` 将 FAT 文件系统挂载到 `/sdcard`，挂载失败时不会自动格式化。主程序
+不会对 SD 初始化结果调用 `ESP_ERROR_CHECK`，因此未插卡、通信失败或文件系统损坏
+只会记录警告，不会导致设备重启。`sd_get_usage()` 返回总容量和剩余容量，
+`sd_deinit()` 只负责卸载文件系统；SPI2 由应用程序统一持有和管理。
 
 ### 触摸驱动
 
@@ -152,18 +167,22 @@ xc_esp32s3/
 |   |-- main.c
 |   |-- inc/
 |   |   |-- aw9523b.h
+|   |   |-- display.h
 |   |   |-- i2c.h
 |   |   |-- interrupt_manager.h
 |   |   |-- key_interrupt.h
 |   |   |-- lcd.h
+|   |   |-- sd.h
 |   |   |-- spi.h
 |   |   `-- tp.h
 |   `-- src/
 |       |-- aw9523b.c
+|       |-- display.c
 |       |-- i2c.c
 |       |-- interrupt_manager.c
 |       |-- key_interrupt.c
 |       |-- lcd.c
+|       |-- sd.c
 |       |-- spi.c
 |       `-- tp.c
 |-- README.md
@@ -305,7 +324,7 @@ I (...) I2C: I2C0 ready: SCL=GPIO2, SDA=GPIO3
 I (...) AW9523B: Ready: address=0x59, ID=0x23
 I (...) AW9523B: INTN ready, P0 mask=0x03, P1 mask=0x00
 I (...) INT_MGR: Shared interrupt ready on GPIO42, flags=0x0001
-I (...) SPI: SPI2 ready: SCLK=15, MOSI=16, MISO=17, max transfer=9600 bytes
+I (...) SPI: SPI2 ready: SCLK=15, MOSI=16, MISO=17, max transfer=16384 bytes
 I (...) LCD: ST7789V2 ready: X=240, Y=320, SPI2 60 MHz, CS=47, DC=48
 I (...) KEY: K0 pressed
 I (...) BOX3: K1 pressed, red LED on

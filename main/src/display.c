@@ -6,8 +6,6 @@
 #include "lcd.h"
 #include "lcdfont.h"
 
-#define DISPLAY_MAX_GLYPH_PIXELS (32U * 16U)
-
 typedef struct {
     const unsigned char *bitmap;
     uint8_t width;
@@ -96,8 +94,7 @@ esp_err_t lcd_show_char(uint16_t x,
                         uint16_t y,
                         char character,
                         uint8_t font_height,
-                        uint16_t foreground_color,
-                        uint16_t background_color)
+                        uint16_t font_color)
 {
     display_ascii_glyph_t glyph;
     /* 检查字符是否属于可打印 ASCII，以及字号是否受当前字库支持。 */
@@ -110,8 +107,6 @@ esp_err_t lcd_show_char(uint16_t x,
         return ESP_ERR_INVALID_ARG;
     }
 
-    uint16_t glyph_pixels[DISPLAY_MAX_GLYPH_PIXELS];
-
     /*
      * 字模原始数据按“从上到下逐行、每行从左到右”保存。当前 LCD 的 X 轴
      * 从下向上，Y 轴从左向右，因此显示一个正向字符时需要重新排列像素：
@@ -120,26 +115,47 @@ esp_err_t lcd_show_char(uint16_t x,
      *  - 字模的列映射到 LCD 的 Y 轴，保持从左向右的顺序。
      */
     for (uint8_t y_offset = 0; y_offset < glyph.width; ++y_offset) {
-        for (uint8_t x_offset = 0; x_offset < glyph.height; ++x_offset) {
+        uint8_t x_offset = 0;
+        while (x_offset < glyph.height) {
             const uint8_t source_row = glyph.height - 1U - x_offset;
             const uint8_t source_column = y_offset;
             const size_t byte_index =
                 (size_t)source_row * glyph.bytes_per_row + source_column / 8U;
             const uint8_t bit_mask =
                 (uint8_t)(0x80U >> (source_column % 8U));
-            const bool pixel_is_foreground =
-                (glyph.bitmap[byte_index] & bit_mask) != 0;
 
-            glyph_pixels[(size_t)y_offset * glyph.height + x_offset] =
-                pixel_is_foreground ? foreground_color : background_color;
+            /* 跳过当前行的空白像素，保持屏幕原有背景不变。 */
+            if ((glyph.bitmap[byte_index] & bit_mask) == 0) {
+                ++x_offset;
+                continue;
+            }
+
+            /* 找到一段连续笔画，一次写入，减少 LCD 事务次数。 */
+            const uint8_t run_start = x_offset;
+            ++x_offset;
+            while (x_offset < glyph.height) {
+                const uint8_t next_source_row = glyph.height - 1U - x_offset;
+                const size_t next_byte_index =
+                    (size_t)next_source_row * glyph.bytes_per_row +
+                    source_column / 8U;
+                if ((glyph.bitmap[next_byte_index] & bit_mask) == 0) {
+                    break;
+                }
+                ++x_offset;
+            }
+
+            esp_err_t result = lcd_fill_rect((uint16_t)(x + run_start),
+                                              (uint16_t)(y + y_offset),
+                                              (uint16_t)(x_offset - run_start),
+                                              1,
+                                              font_color);
+            if (result != ESP_OK) {
+                return result;
+            }
         }
     }
 
-    return lcd_draw_pixels(x,
-                           y,
-                           glyph.height,
-                           glyph.width,
-                           glyph_pixels);
+    return ESP_OK;
 }
 
 esp_err_t lcd_show_string(uint16_t x,
@@ -148,8 +164,7 @@ esp_err_t lcd_show_string(uint16_t x,
                           uint16_t y_size,
                           uint8_t font_height,
                           const char *text,
-                          uint16_t foreground_color,
-                          uint16_t background_color)
+                          uint16_t font_color)
 {
     if (text == NULL || !display_region_is_valid(x, y, x_size, y_size)) {
         return ESP_ERR_INVALID_ARG;
@@ -219,8 +234,7 @@ esp_err_t lcd_show_string(uint16_t x,
                                          (uint16_t)character_y,
                                          *current,
                                          font_height,
-                                         foreground_color,
-                                         background_color);
+                                         font_color);
         if (result != ESP_OK) {
             return result;
         }

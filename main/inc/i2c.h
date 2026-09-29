@@ -4,10 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "driver/i2c_master.h"
 #include "esp_err.h"
 
-/** Opaque handle for a device attached to the board I2C bus. */
-typedef struct board_i2c_device *board_i2c_device_handle_t;
+/** Handle for a device attached to the board I2C bus. */
+typedef i2c_master_dev_handle_t board_i2c_device_handle_t;
 
 /**
  * @brief Initialize the BOX3 I2C0 master bus.
@@ -16,6 +17,12 @@ typedef struct board_i2c_device *board_i2c_device_handle_t;
  * than once is safe.
  */
 esp_err_t board_i2c_init(void);
+
+/**
+ * 释放 I2C0 总线。调用前必须先移除通过 board_i2c_add_device() 添加的全部设备；
+ * 如果仍有设备占用总线，函数会返回错误并保留当前总线状态。
+ */
+esp_err_t board_i2c_deinit(void);
 
 /** Add a 7-bit addressed device to the initialized board I2C bus. */
 esp_err_t board_i2c_add_device(uint16_t device_address,

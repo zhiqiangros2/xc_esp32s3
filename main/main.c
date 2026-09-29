@@ -3,80 +3,38 @@
 #include <stdio.h>
 
 #include "aw9523b.h"
+#include "bsp_info.h"
 #include "display.h"
-#include "esp_chip_info.h"
-#include "esp_flash.h"
-#include "esp_heap_caps.h"
-#include "esp_idf_version.h"
 #include "esp_log.h"
-#include "esp_psram.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c.h"
 #include "interrupt_manager.h"
 #include "key_interrupt.h"
 #include "lcd.h"
+#include "nvs_flash.h"
+#include "sd.h"
+#include "spi.h"
 #include "tp.h"
 
 #define BYTES_PER_MIB (1024U * 1024U)
 
 static const char *TAG = "BOX3";
-static bool test_psram(void)
-{
-    uint8_t *buffer = heap_caps_malloc(BYTES_PER_MIB,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate 1 MiB from PSRAM");
-        return false;
-    }
-
-    for (size_t i = 0; i < BYTES_PER_MIB; ++i) {
-        buffer[i] = (uint8_t)((i * 31U) ^ (i >> 8));
-    }
-
-    for (size_t i = 0; i < BYTES_PER_MIB; ++i) {
-        const uint8_t expected = (uint8_t)((i * 31U) ^ (i >> 8));
-        if (buffer[i] != expected) {
-            ESP_LOGE(TAG, "PSRAM verify failed at offset %u", (unsigned)i);
-            heap_caps_free(buffer);
-            return false;
-        }
-    }
-
-    heap_caps_free(buffer);
-    return true;
-}
 
 void app_main(void)
 {
-    esp_chip_info_t chip_info;
-    uint32_t flash_size = 0;
-
-    esp_chip_info(&chip_info);
-    ESP_ERROR_CHECK(esp_flash_get_size(NULL, &flash_size));
-
-    const size_t psram_size = esp_psram_is_initialized() ? esp_psram_get_size() : 0;
-    const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-
-    printf("\nHello World from ALIENTEK DNESP32S3 BOX3!\n");
-    printf("ESP-IDF: %s\n", esp_get_idf_version());
-    printf("Chip: %s, %u core(s), revision %u\n",
-           CONFIG_IDF_TARGET,
-           chip_info.cores,
-           (unsigned)chip_info.revision);
-    printf("Flash: %u MiB\n", (unsigned)(flash_size / BYTES_PER_MIB));
-    printf("PSRAM: %u MiB total, %u KiB free\n",
-           (unsigned)(psram_size / BYTES_PER_MIB),
-           (unsigned)(psram_free / 1024U));
-
-    if (flash_size != 16U * BYTES_PER_MIB) {
-        ESP_LOGW(TAG, "Expected 16 MiB Flash, detected %u bytes", (unsigned)flash_size);
+    /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
     }
-    if (psram_size != 8U * BYTES_PER_MIB) {
-        ESP_LOGW(TAG, "Expected 8 MiB PSRAM, detected %u bytes", (unsigned)psram_size);
-    }
+    ESP_ERROR_CHECK(err);
 
-    ESP_LOGI(TAG, "1 MiB PSRAM read/write test: %s", test_psram() ? "PASS" : "FAIL");
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
+    bsp_info_print();
 
     /* K0 独立连接 GPIO0，不经过 I2C 或 GPIO42 共享中断管理器。 */
     ESP_ERROR_CHECK(key_interrupt_init());
@@ -92,13 +50,6 @@ void app_main(void)
     /* 配置 AW9523B 的 K1/K2 输入变化中断。 */
     ESP_ERROR_CHECK(aw9523b_interrupt_init());
 
-    /*
-     * 基础外设就绪后初始化 LCD，并显示八色竖向测试色条，用于检查屏幕
-     * 刷新、RGB565 颜色以及横屏显示方向是否正常。
-     */
-    ESP_ERROR_CHECK(lcd_init());
-    ESP_ERROR_CHECK(lcd_show_test_pattern());
-
     /* CHSC5432 通过 I2C 读取触点，复位信号由 AW9523B P1_7 控制。 */
     ESP_ERROR_CHECK(tp_init());
 
@@ -106,9 +57,50 @@ void app_main(void)
     ESP_ERROR_CHECK(interrupt_manager_init(INTERRUPT_SOURCE_AW9523B |
                                            INTERRUPT_SOURCE_TOUCH));
 
+    /*
+     * LCD 和 SD 共用 SPI2 的 SCLK=GPIO15、MOSI=GPIO16、MISO=GPIO17，
+     * 这里只初始化一次总线；两个设备之后分别使用 LCD_CS=GPIO47 和
+     * SD_CS=GPIO18，ESP-IDF 会按设备片选自动串行化读写事务。
+     */
+    ESP_ERROR_CHECK(board_spi_init(BOARD_SPI_MAX_TRANSFER_SIZE));
 
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_LGRAY));
+    /*
+     * 基础外设就绪后初始化 LCD，并显示八色竖向测试色条，用于检查屏幕
+     * 刷新、RGB565 颜色以及横屏显示方向是否正常。
+     */
+    ESP_ERROR_CHECK(lcd_init());
+    ESP_ERROR_CHECK(lcd_show_test_pattern());
+
+    /*
+     * SD 与 LCD 共用 SPI2，仅片选不同。未插卡、卡损坏或文件系统无法挂载时
+     * 只记录警告，不触发 ESP_ERROR_CHECK 重启，其他功能继续正常运行。
+     */
+    esp_err_t sd_result = sd_init();
+    if (sd_result != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "SD unavailable; continuing without storage: %s",
+                 esp_err_to_name(sd_result));
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    /* 等待 1 秒后再读取 SD 卡容量，避免刚挂载完成就立即查询。 */
+    if (sd_result == ESP_OK) {
+        uint64_t sd_total_bytes = 0;
+        uint64_t sd_free_bytes = 0;
+        sd_result = sd_get_usage(&sd_total_bytes, &sd_free_bytes);
+        if (sd_result == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "SD FATFS: total=%llu MiB, free=%llu MiB",
+                     (unsigned long long)(sd_total_bytes / BYTES_PER_MIB),
+                     (unsigned long long)(sd_free_bytes / BYTES_PER_MIB));
+        } else {
+            ESP_LOGW(TAG,
+                     "Failed to query SD capacity: %s",
+                     esp_err_to_name(sd_result));
+        }
+    }
+
+    ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_GREEN));
     uint32_t seconds = 0;
     char uptime_text[40];
     while (true) {
@@ -122,7 +114,7 @@ void app_main(void)
                                                   0,
                                                   16,
                                                   LCD_Y_RESOLUTION,
-                                                  LCD_COLOR_BLACK);
+                                                  LCD_COLOR_WHITE);
         if (display_result == ESP_OK) {
             display_result = lcd_show_string(0,
                                              0,
@@ -130,7 +122,6 @@ void app_main(void)
                                              LCD_Y_RESOLUTION,
                                              16,
                                              uptime_text,
-                                             LCD_COLOR_WHITE,
                                              LCD_COLOR_BLACK);
         }
         if (display_result == ESP_OK) {
@@ -140,7 +131,6 @@ void app_main(void)
                                              LCD_Y_RESOLUTION,
                                              16,
                                              "xc_lcd",
-                                             LCD_COLOR_WHITE,
                                              LCD_COLOR_BLACK);
         }
         if (display_result == ESP_OK) {
@@ -148,7 +138,6 @@ void app_main(void)
                                            0,
                                            'A',
                                            16,
-                                           LCD_COLOR_WHITE,
                                            LCD_COLOR_BLACK);
         }
         if (display_result != ESP_OK) {
