@@ -7,10 +7,12 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "tp.h"
 
 #define SHARED_INTERRUPT_GPIO GPIO_NUM_42
 #define INTERRUPT_RETRY_DELAY_MS 10
-#define INTERRUPT_SUPPORTED_SOURCES INTERRUPT_SOURCE_AW9523B
+#define INTERRUPT_SUPPORTED_SOURCES \
+    (INTERRUPT_SOURCE_AW9523B | INTERRUPT_SOURCE_TOUCH)
 
 static const char *TAG = "INT_MGR";
 static TaskHandle_t manager_task_handle = NULL;
@@ -34,7 +36,7 @@ static void interrupt_manager_task(void *arg)
 
     while (true) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        ESP_LOGI(TAG, "GPIO42 interrupt triggered");
+        //ESP_LOGI(TAG, "GPIO42 interrupt triggered");
 
         /*
          * GPIO42 是多个低电平有效、开漏中断源的线与结果。无法通过 GPIO 电平
@@ -42,6 +44,15 @@ static void interrupt_manager_task(void *arg)
          * 就继续查询，避免 I2C 瞬时失败导致中断无法释放且不再产生下降沿。
          */
         while (true) {
+            
+            if ((enabled_source_flags & INTERRUPT_SOURCE_TOUCH) != 0) {
+                esp_err_t result = tp_interrupt_process();
+                if (result != ESP_OK) {
+                    ESP_LOGE(TAG, "CHSC5432 interrupt query failed: %s",
+                             esp_err_to_name(result));
+                }
+            }
+
             if ((enabled_source_flags & INTERRUPT_SOURCE_AW9523B) != 0) {
                 esp_err_t result = aw9523b_interrupt_process();
                 if (result != ESP_OK) {

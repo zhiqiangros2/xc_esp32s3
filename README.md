@@ -4,8 +4,9 @@
 `ATK-DNESP32S3B3 V1`（BOX3）开发板。
 
 程序启动后会检测 Flash 和 PSRAM 容量，执行一次 1 MiB PSRAM 写入/读回测试，
-初始化 AW9523B 扩展 GPIO 和板载 2.4 英寸 LCD，在屏幕上显示测试色条，启用
-K0/K1/K2 按键中断，然后每隔五秒通过 USB 串口输出一条运行日志。
+初始化 AW9523B 扩展 GPIO、板载 2.4 英寸 LCD 和外接 CHSC5432 电容触摸屏，
+在屏幕上显示测试色条，启用 K0/K1/K2 与触摸中断，然后每隔五秒通过 USB
+串口输出一条运行日志。
 
 ## 硬件配置
 
@@ -18,15 +19,16 @@ K0/K1/K2 按键中断，然后每隔五秒通过 USB 串口输出一条运行日
 | AW9523B | I2C0，SCL=GPIO2，SDA=GPIO3，地址 `0x59`，INT=GPIO42 |
 | LCD | ST7789V2，320×240，SPI2：SCLK=GPIO15、MOSI=GPIO16、MISO=GPIO17、CS=GPIO47、DC=GPIO48；RESX 与 CHIP_PU 共用复位网络 |
 | LCD 背光 | AW9523B P1_0，低电平点亮 |
-| 外接触摸屏 | CHSC5432，地址 `0x2E`，INT 与 AW9523B 共用 GPIO42（当前未接） |
+| 外接触摸屏 | CHSC5432，I2C 地址 `0x2E`，INT 与 AW9523B 共用 GPIO42，RESET=AW9523B P1_7 |
 | 下载与日志 | Type-C 原生 USB，GPIO19/GPIO20 |
 | 开发板型号 | ATK-DNESP32S3B3 V1 |
 
 配置依据见 `pdf` 目录中的
 [ATK_DNESP32S3B3_V1.0.pdf](./pdf/ATK_DNESP32S3B3_V1.0.pdf) 和
 [AW9523BTQR.pdf](./pdf/AW9523BTQR.pdf)，LCD 控制器配置另参考
-[ST7789.pdf](./pdf/ST7789.pdf) 和
-[正点原子 BOX3 SPI-LCD 实验](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/lcd/)。
+[ST7789.pdf](./pdf/ST7789.pdf)、[CHSC5xxx.pdf](./pdf/CHSC5xxx.pdf)、
+[正点原子 BOX3 SPI-LCD 实验](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/lcd/)
+和[正点原子 BOX3 触摸实验](https://wiki.alientek.com/docs/Boards/IoT/DNESP32S3B3/example-idf/touch/)。
 
 板载红蓝双色 LED 并未直接连接 ESP32-S3 GPIO，而是连接在 AW9523B IO
 扩展芯片的 P1_1 和 P1_2 上。本示例初始化 AW9523B、校验芯片 ID、配置端口
@@ -40,8 +42,9 @@ K0/K1/K2 按键中断，然后每隔五秒通过 USB 串口输出一条运行日
 - 从 PSRAM 分配 1 MiB 缓冲区并完成写入、读回校验。
 - 初始化 AW9523B 独立驱动，并验证 ID 寄存器值为 `0x23`。
 - 初始化 ST7789V2 LCD，在 320×240 横屏模式下显示八色测试图。
+- 初始化 CHSC5432，读取芯片 ID，并通过 GPIO42 中断输出最多 5 个触点坐标。
 - 通过 GPIO42 共享中断管理器查询 AW9523B；K1/K2 分别切换红灯/蓝灯。
-- GPIO42 使用标志位选择处理模块；AW9523B 对应 `0x0001`。
+- GPIO42 使用标志位选择处理模块；AW9523B 对应 `0x0001`，触摸对应 `0x0002`。
 - 使用 GPIO0 下降沿中断检测 K0，任务中进行 20 ms 消抖；每次按下打印一次日志。
 - 每隔五秒输出运行时间，便于确认程序持续运行。
 
@@ -92,11 +95,10 @@ BOX3 硬件设计把 K1、K2 配置为输入，其余 14 路配置为输出。�
 
 AW9523B 的 INTN 与外接触摸屏的 INT 都是低电平有效信号，共用 ESP32-S3
 GPIO42。`interrupt_manager.c/.h` 独占该 GPIO 的 ISR；ISR 只通知 FreeRTOS
-任务，不访问 I2C。管理任务根据启用标志调用各模块的中断处理函数；当前启用
-`0x0001`，因此调用 `aw9523b_interrupt_process()`。未来接入 CHSC5xxx 后可增加
-`0x0002` 标志和触摸模块处理函数，同一次中断依次读取两颗芯片，再分别处理。
-当前触摸屏未连接、未启用，任务只查询 AW9523B。若任一设备仍将共享线拉低，
-管理任务会延时重试，防止因没有新的下降沿而丢失中断。
+任务，不访问 I2C。管理任务启用 `0x0001 | 0x0002`，同一次中断依次调用
+`aw9523b_interrupt_process()` 和 `tp_interrupt_process()`，读取两颗芯片后分别
+处理。若任一设备仍将共享线拉低，管理任务会延时重试，防止因没有新的下降沿
+而丢失中断。
 
 本示例固定使能 P0 上 K1 和 K2 的 AW9523B 中断，P0 其余引脚及整个 P1 保持屏蔽。
 中断处理读取 P0 输入寄存器 `0x00` 释放 INTN，并按 20 ms 时间窗过滤按键抖动。
@@ -123,6 +125,21 @@ ST7789 所需的大端线上字节序。区域必须完全位于屏幕范围内�
 - `lcd_draw_bitmap()`：显示行优先 RGB565 位图。
 - `lcd_show_test_pattern()`：显示八色竖向测试条。
 
+### 触摸驱动
+
+`tp.c/.h` 驱动外接 2.4 英寸电容触摸屏上的 CHSC5432。芯片使用 I2C0、7 位
+地址 `0x2E`；复位并非 ESP32-S3 独立 GPIO，而是原理图中的
+`TP_CAM_RESET`，由 AW9523B P1_7 控制。该复位信号也与摄像头接口共用。
+
+`tp_init()` 将复位信号拉低再拉高，读取 Boot 版本，以及配置区中的 IC 型号、
+配置版本、Project ID、Vendor ID、TP 原始 X/Y 分辨率和最大触点数。全部字段
+读取并输出日志后，再确认芯片为 CHSC5432、原始分辨率为 240×320 且支持
+5 个触点，从而与 LCD 的 320×240 横屏方向对应。`tp_read()` 从事件地址
+`0x2000002C` 一次读取官方建议的 28 字节，解析最多 5 个触点，并根据 TP 实际
+分辨率完成越界检查和横屏转换。`tp_interrupt_process()` 由 GPIO42 共享中断任务
+调用，读取事件后通过日志输出触点坐标；应用也可以直接调用 `tp_read()` 获取
+`tp_state_t`。
+
 ## 工程结构
 
 ```text
@@ -138,18 +155,21 @@ xc_esp32s3/
 |   |   |-- interrupt_manager.h
 |   |   |-- key_interrupt.h
 |   |   |-- lcd.h
-|   |   `-- spi.h
+|   |   |-- spi.h
+|   |   `-- tp.h
 |   `-- src/
 |       |-- aw9523b.c
 |       |-- i2c.c
 |       |-- interrupt_manager.c
 |       |-- key_interrupt.c
 |       |-- lcd.c
-|       `-- spi.c
+|       |-- spi.c
+|       `-- tp.c
 |-- README.md
 `-- pdf/
     |-- ATK_DNESP32S3B3_V1.0.pdf
     |-- AW9523BTQR.pdf
+    |-- CHSC5xxx.pdf
     `-- ST7789.pdf
 ```
 

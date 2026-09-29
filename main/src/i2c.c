@@ -6,6 +6,8 @@
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define BOARD_I2C_PORT I2C_NUM_0
 #define BOARD_I2C_SCL_GPIO GPIO_NUM_2
@@ -17,6 +19,7 @@ struct board_i2c_device {
 
 static const char *TAG = "I2C";
 static i2c_master_bus_handle_t bus_handle = NULL;
+static SemaphoreHandle_t i2c_bus_mutex = NULL;
 static bool initialized = false;
 
 esp_err_t board_i2c_init(void)
@@ -46,6 +49,13 @@ esp_err_t board_i2c_init(void)
     } else if (result != ESP_OK) {
         bus_handle = NULL;
         return result;
+    }
+
+    i2c_bus_mutex = xSemaphoreCreateMutex();
+    if (i2c_bus_mutex == NULL) {
+        i2c_del_master_bus(bus_handle);
+        bus_handle = NULL;
+        return ESP_ERR_NO_MEM;
     }
 
     initialized = true;
@@ -112,7 +122,13 @@ esp_err_t board_i2c_transmit(board_i2c_device_handle_t device,
         return ESP_ERR_INVALID_ARG;
     }
 
-    return i2c_master_transmit(device->handle, data, data_size, timeout_ms);
+    xSemaphoreTake(i2c_bus_mutex, portMAX_DELAY);
+    esp_err_t result = i2c_master_transmit(device->handle,
+                                           data,
+                                           data_size,
+                                           timeout_ms);
+    xSemaphoreGive(i2c_bus_mutex);
+    return result;
 }
 
 esp_err_t board_i2c_transmit_receive(board_i2c_device_handle_t device,
@@ -127,10 +143,13 @@ esp_err_t board_i2c_transmit_receive(board_i2c_device_handle_t device,
         return ESP_ERR_INVALID_ARG;
     }
 
-    return i2c_master_transmit_receive(device->handle,
-                                       write_data,
-                                       write_size,
-                                       read_data,
-                                       read_size,
-                                       timeout_ms);
+    xSemaphoreTake(i2c_bus_mutex, portMAX_DELAY);
+    esp_err_t result = i2c_master_transmit_receive(device->handle,
+                                                    write_data,
+                                                    write_size,
+                                                    read_data,
+                                                    read_size,
+                                                    timeout_ms);
+    xSemaphoreGive(i2c_bus_mutex);
+    return result;
 }

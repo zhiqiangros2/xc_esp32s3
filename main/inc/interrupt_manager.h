@@ -6,7 +6,10 @@
 #include "esp_err.h"
 
 /** GPIO42 上启用 AW9523B 中断处理。 */
-#define INTERRUPT_SOURCE_AW9523B 0x0001U
+#define INTERRUPT_SOURCE_AW9523B 0x0002U
+
+/** GPIO42 上启用 CHSC5432 触摸中断处理。 */
+#define INTERRUPT_SOURCE_TOUCH 0x0001U
 
 /**
  * @brief 初始化 GPIO42 共享低电平中断和处理任务。
