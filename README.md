@@ -131,15 +131,23 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动并提供基础绘图接口；`display.c/.h` 
 
 ### SD 卡驱动
 
-`sd.c/.h` 使用 ESP-IDF SDSPI 和 FATFS 驱动板载 microSD 卡。SD 与 LCD 共用
+`sd_fatfs.c` 和 `sd_fatfs.h` 使用 ESP-IDF SDSPI 和 FATFS 驱动板载 microSD 卡。SD 与 LCD 共用
 SPI2 的 GPIO15/GPIO16/GPIO17，由 SPI 主机驱动自动串行化两个设备的事务；LCD
 使用 GPIO47 片选，SD 使用 GPIO18 片选。`main.c` 先调用一次
 `board_spi_init()`，LCD 和 SD 随后分别把自己的设备加入这条共享总线。
 
 `sd_init()` 将 FAT 文件系统挂载到 `/sdcard`，挂载失败时不会自动格式化。主程序
 不会对 SD 初始化结果调用 `ESP_ERROR_CHECK`，因此未插卡、通信失败或文件系统损坏
-只会记录警告，不会导致设备重启。`sd_get_usage()` 返回总容量和剩余容量，
-`sd_deinit()` 只负责卸载文件系统；SPI2 由应用程序统一持有和管理。
+只会记录警告，不会导致设备重启。`sd_fatfs_test()` 会直接调用
+`esp_vfs_fat_info()` 查询总容量和剩余容量，`sd_deinit()` 只负责卸载文件系统；
+SPI2 由应用程序统一持有和管理。
+
+### 内部 Flash FATFS
+
+`fatfs.c` 和 `fatfs.h` 使用 `vfs` 分区上的内部 Flash FATFS，挂载点为 `/vfs`。
+挂载时通过 ESP-IDF Wear Levelling 适配 Flash 擦写，首次使用且分区尚未格式化时
+允许自动格式化。`fatfs_test()` 与 SD FATFS 使用相同的写入、读回校验、删除旧文件
+和重命名测试流程；它与 SD 卡 FATFS 使用不同的分区和路径，可以同时挂载。
 
 ### 触摸驱动
 
@@ -156,33 +164,45 @@ SPI2 的 GPIO15/GPIO16/GPIO17，由 SPI 主机驱动自动串行化两个设备�
 调用，读取事件后通过日志输出触点坐标；应用也可以直接调用 `tp_read()` 获取
 `tp_state_t`。
 
+### LittleFS 组件
+
+LittleFS 源码已作为项目内置组件放在 `components/littlefs/`，主工程通过
+`main/CMakeLists.txt` 直接依赖本地 `littlefs` 组件。这样克隆项目后不需要从
+ESP-IDF Component Manager 下载 LittleFS；`managed_components/` 仅作为工具生成的
+依赖目录保留并被 `.gitignore` 忽略。LittleFS 挂载到内部 Flash 的 `storage` 分区，
+挂载点为 `/littlefs`。
+
 ## 工程结构
 
 ```text
 xc_esp32s3/
 |-- CMakeLists.txt
 |-- sdkconfig.defaults
+|-- components/
+|   `-- littlefs/             # 项目内置的 LittleFS 组件源码
 |-- main/
 |   |-- CMakeLists.txt
 |   |-- main.c
 |   |-- inc/
 |   |   |-- aw9523b.h
 |   |   |-- display.h
+|   |   |-- fatfs.h
 |   |   |-- i2c.h
 |   |   |-- interrupt_manager.h
 |   |   |-- key_interrupt.h
 |   |   |-- lcd.h
-|   |   |-- sd.h
+|   |   |-- sd_fatfs.h
 |   |   |-- spi.h
 |   |   `-- tp.h
 |   `-- src/
 |       |-- aw9523b.c
 |       |-- display.c
+|       |-- fatfs.c
 |       |-- i2c.c
 |       |-- interrupt_manager.c
 |       |-- key_interrupt.c
 |       |-- lcd.c
-|       |-- sd.c
+|       |-- sd_fatfs.c
 |       |-- spi.c
 |       `-- tp.c
 |-- README.md

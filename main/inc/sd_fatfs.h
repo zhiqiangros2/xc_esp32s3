@@ -1,7 +1,5 @@
-#ifndef BOARD_SD_H
-#define BOARD_SD_H
-
-#include <stdint.h>
+#ifndef BOARD_SD_FATFS_H
+#define BOARD_SD_FATFS_H
 
 #include "esp_err.h"
 
@@ -16,8 +14,10 @@
  */
 esp_err_t sd_init(void);
 
-/** 获取 FAT 文件系统的总容量和当前可用字节数。 */
-esp_err_t sd_get_usage(uint64_t *total_bytes, uint64_t *free_bytes);
+/**
+ * @brief 在已挂载的 SD 卡 FATFS 上执行文件写入、读回和重命名测试。
+ */
+esp_err_t sd_fatfs_test(void);
 
 /** 卸载 SD 卡；应用程序拥有的 SPI2 总线仍保持可用。 */
 esp_err_t sd_deinit(void);

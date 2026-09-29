@@ -5,6 +5,7 @@
 #include "aw9523b.h"
 #include "bsp_info.h"
 #include "display.h"
+#include "fatfs.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -12,12 +13,11 @@
 #include "interrupt_manager.h"
 #include "key_interrupt.h"
 #include "lcd.h"
+#include "littlefs.h"
 #include "nvs_flash.h"
-#include "sd.h"
+#include "sd_fatfs.h"
 #include "spi.h"
 #include "tp.h"
-
-#define BYTES_PER_MIB (1024U * 1024U)
 
 static const char *TAG = "BOX3";
 
@@ -60,7 +60,10 @@ void app_main(void)
     /*
      * LCD 和 SD 共用 SPI2 的 SCLK=GPIO15、MOSI=GPIO16、MISO=GPIO17，
      * 这里只初始化一次总线；两个设备之后分别使用 LCD_CS=GPIO47 和
-     * SD_CS=GPIO18，ESP-IDF 会按设备片选自动串行化读写事务。
+     * SD_CS=GPIO18。LCD 和 SD 都会注册成 SPI2 上的独立设备，ESP-IDF
+     * 内部的 SPI bus lock 会把同时到来的读写请求自动排队，同一时刻只
+     * 允许一个设备执行事务，因此不需要手动切换 CS，也不要再增加一把
+     * 跨 LCD/SD 的全局 SPI mutex。
      */
     ESP_ERROR_CHECK(board_spi_init(BOARD_SPI_MAX_TRANSFER_SIZE));
 
@@ -71,33 +74,52 @@ void app_main(void)
     ESP_ERROR_CHECK(lcd_init());
     ESP_ERROR_CHECK(lcd_show_test_pattern());
 
-    /*
-     * SD 与 LCD 共用 SPI2，仅片选不同。未插卡、卡损坏或文件系统无法挂载时
-     * 只记录警告，不触发 ESP_ERROR_CHECK 重启，其他功能继续正常运行。
-     */
+    /* SD 与 LCD 共用 SPI2；SD 挂载失败时只记录警告，不影响其他功能。 */
     esp_err_t sd_result = sd_init();
-    if (sd_result != ESP_OK) {
+    if (sd_result == ESP_OK) {
+        /* 挂载成功后执行 SD FATFS 的写入、读回校验和重命名测试。 */
+        const esp_err_t sd_test_result = sd_fatfs_test();
+        if (sd_test_result != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "SD FATFS test failed: %s",
+                     esp_err_to_name(sd_test_result));
+        }
+    } else {
         ESP_LOGW(TAG,
                  "SD unavailable; continuing without storage: %s",
                  esp_err_to_name(sd_result));
     }
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    /* 等待 1 秒后再读取 SD 卡容量，避免刚挂载完成就立即查询。 */
-    if (sd_result == ESP_OK) {
-        uint64_t sd_total_bytes = 0;
-        uint64_t sd_free_bytes = 0;
-        sd_result = sd_get_usage(&sd_total_bytes, &sd_free_bytes);
-        if (sd_result == ESP_OK) {
-            ESP_LOGI(TAG,
-                     "SD FATFS: total=%llu MiB, free=%llu MiB",
-                     (unsigned long long)(sd_total_bytes / BYTES_PER_MIB),
-                     (unsigned long long)(sd_free_bytes / BYTES_PER_MIB));
-        } else {
+    /* 挂载内部 Flash 的 vfs FATFS 分区；失败时只记录警告，不触发重启。 */
+    esp_err_t fatfs_result = fatfs_init();
+    if (fatfs_result == ESP_OK) {
+        /* 挂载成功后执行内部 Flash FATFS 的文件读写测试。 */
+        const esp_err_t fatfs_test_result = fatfs_test();
+        if (fatfs_test_result != ESP_OK) {
             ESP_LOGW(TAG,
-                     "Failed to query SD capacity: %s",
-                     esp_err_to_name(sd_result));
+                     "Flash FATFS test failed: %s",
+                     esp_err_to_name(fatfs_test_result));
         }
+    } else {
+        ESP_LOGW(TAG,
+                 "Flash FATFS unavailable; continuing without storage: %s",
+                 esp_err_to_name(fatfs_result));
+    }
+
+    /* 挂载内部 Flash 的 LittleFS 分区；失败时只记录警告，不触发重启。 */
+    esp_err_t littlefs_result = littlefs_init();
+    if (littlefs_result == ESP_OK) {
+        /* 挂载成功后执行 LittleFS 的文件读写测试。 */
+        const esp_err_t littlefs_test_result = littlefs_test();
+        if (littlefs_test_result != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "LittleFS test failed: %s",
+                     esp_err_to_name(littlefs_test_result));
+        }
+    } else {
+        ESP_LOGW(TAG,
+                 "LittleFS unavailable; continuing without storage: %s",
+                 esp_err_to_name(littlefs_result));
     }
 
     ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_GREEN));

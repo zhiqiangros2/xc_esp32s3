@@ -1,5 +1,15 @@
+# ESP-IDF 编译输出和 CMake/Ninja 中间文件。
 /build/
 /.ccache/
+
+# ESP-IDF 自动生成的当前配置和旧配置备份。
 /sdkconfig
 /sdkconfig.old
+
+# 本地调试日志。
 /debug.log
+
+# Component Manager 的下载缓存和自动生成组件目录。
+# LittleFS 已经内置在 components/littlefs/，该目录不能加入忽略规则。
+/.component_cache/
+/managed_components/
