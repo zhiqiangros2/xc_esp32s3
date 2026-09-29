@@ -41,7 +41,7 @@
 - 检测实际 PSRAM 容量，期望值为 8 MiB。
 - 从 PSRAM 分配 1 MiB 缓冲区并完成写入、读回校验。
 - 初始化 AW9523B 独立驱动，并验证 ID 寄存器值为 `0x23`。
-- 初始化 ST7789V2 LCD，在 320×240 横屏模式下显示八色测试图。
+- 初始化 ST7789V2 LCD，以左下角为原点、Y 为物理横轴显示八色测试图。
 - 初始化 CHSC5432，读取芯片 ID，并通过 GPIO42 中断输出最多 5 个触点坐标。
 - 通过 GPIO42 共享中断管理器查询 AW9523B；K1/K2 分别切换红灯/蓝灯。
 - GPIO42 使用标志位选择处理模块；AW9523B 对应 `0x0001`，触摸对应 `0x0002`。
@@ -107,7 +107,8 @@ GPIO42。`interrupt_manager.c/.h` 独占该 GPIO 的 ISR；ISR 只通知 FreeRTO
 
 `spi.c/.h` 负责 SPI2 总线初始化、板级引脚和 DMA 内存管理；`lcd.c/.h` 使用
 ESP-IDF 的 `esp_lcd` ST7789 驱动。屏幕以 60 MHz、SPI 模式 0 工作，逻辑分辨率
-固定为 320×240 横屏。LCD 的 RESX 通过 `ESP_LCD_RESET` 网络与 ESP32-S3 的
+使用 X=240、Y=320 原生地址，物理原点位于左下角，横轴为 Y。LCD 的 RESX 通过
+`ESP_LCD_RESET` 网络与 ESP32-S3 的
 `CHIP_PU` 共用，不能作为独立 GPIO 控制，因此面板驱动使用 ST7789 软件复位；背光
 通过 AW9523B P1_0 控制，并按低电平有效逻辑封装为 `lcd_backlight_set()`。
 
@@ -118,7 +119,7 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动。屏幕以 60 MHz、SPI 模式 0 工作，�
 
 - `lcd_init()`：初始化 SPI2、ST7789V2 和背光，重复调用安全。
 - `lcd_backlight_set()`：打开或关闭背光。
-- `lcd_clear()`：使用一个 RGB565 颜色清屏。
+- `lcd_clear()`：使用一个 RGB565 颜色清除整个屏幕。
 - `lcd_fill_rect()`：填充指定矩形区域。
 - `lcd_show_test_pattern()`：显示八色竖向测试条。
 
@@ -131,9 +132,9 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动。屏幕以 60 MHz、SPI 模式 0 工作，�
 `tp_init()` 将复位信号拉低再拉高，读取 Boot 版本，以及配置区中的 IC 型号、
 配置版本、Project ID、Vendor ID、TP 原始 X/Y 分辨率和最大触点数。全部字段
 读取并输出日志后，再确认芯片为 CHSC5432、原始分辨率为 240×320 且支持
-5 个触点，从而与 LCD 的 320×240 横屏方向对应。`tp_read()` 从事件地址
+5 个触点，从而与 LCD 的 X=240、Y=320 原生坐标范围对应。`tp_read()` 从事件地址
 `0x2000002C` 一次读取官方建议的 28 字节，解析最多 5 个触点，并根据 TP 实际
-分辨率完成越界检查和横屏转换。`tp_interrupt_process()` 由 GPIO42 共享中断任务
+分辨率完成越界检查；输出坐标不再旋转或镜像。`tp_interrupt_process()` 由 GPIO42 共享中断任务
 调用，读取事件后通过日志输出触点坐标；应用也可以直接调用 `tp_read()` 获取
 `tp_state_t`。
 
@@ -301,9 +302,8 @@ I (...) I2C: I2C0 ready: SCL=GPIO2, SDA=GPIO3
 I (...) AW9523B: Ready: address=0x59, ID=0x23
 I (...) AW9523B: INTN ready, P0 mask=0x03, P1 mask=0x00
 I (...) INT_MGR: Shared interrupt ready on GPIO42, flags=0x0001
-I (...) SPI: SPI2 ready: SCLK=15, MOSI=16, MISO=17, max transfer=12800 bytes
-I (...) LCD: ST7789V2 ready: 320x240, SPI2 60 MHz, CS=47, DC=48
-I (...) BOX3: Hello World - uptime: 0 s
+I (...) SPI: SPI2 ready: SCLK=15, MOSI=16, MISO=17, max transfer=9600 bytes
+I (...) LCD: ST7789V2 ready: X=240, Y=320, SPI2 60 MHz, CS=47, DC=48
 I (...) KEY: K0 pressed
 I (...) BOX3: K1 pressed, red LED on
 I (...) BOX3: K2 pressed, blue LED on

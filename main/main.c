@@ -91,7 +91,10 @@ void app_main(void)
     /* 配置 AW9523B 的 K1/K2 输入变化中断。 */
     ESP_ERROR_CHECK(aw9523b_interrupt_init());
 
-    /* 基础外设就绪后初始化 LCD，并显示硬件测试色条。 */
+    /*
+     * 基础外设就绪后初始化 LCD，并显示八色竖向测试色条，用于检查屏幕
+     * 刷新、RGB565 颜色以及横屏显示方向是否正常。
+     */
     ESP_ERROR_CHECK(lcd_init());
     ESP_ERROR_CHECK(lcd_show_test_pattern());
 
@@ -102,10 +105,50 @@ void app_main(void)
     ESP_ERROR_CHECK(interrupt_manager_init(INTERRUPT_SOURCE_AW9523B |
                                            INTERRUPT_SOURCE_TOUCH));
 
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_LGRAY));
     uint32_t seconds = 0;
+    char uptime_text[40];
     while (true) {
-        ESP_LOGI(TAG, "Hello World - uptime: %u s", (unsigned)seconds);
-        seconds += 5;
-        vTaskDelay(pdMS_TO_TICKS(5000));
+        snprintf(uptime_text,
+                 sizeof(uptime_text),
+                 "Hello World - uptime: %u s",
+                 (unsigned)seconds);
+
+        /* 每次刷新前清除第一行，避免较短的新内容后面残留旧字符。 */
+        esp_err_t display_result = lcd_fill_rect(0,
+                                                  0,
+                                                  16,
+                                                  LCD_Y_RESOLUTION,
+                                                  LCD_COLOR_BLACK);
+        if (display_result == ESP_OK) {
+            display_result = lcd_show_string(0,
+                                             0,
+                                             16,
+                                             LCD_Y_RESOLUTION,
+                                             16,
+                                             uptime_text,
+                                             LCD_COLOR_WHITE,
+                                             LCD_COLOR_BLACK);
+        }
+        if (display_result == ESP_OK) {
+            display_result = lcd_show_string(20,
+                                             0,
+                                             16,
+                                             LCD_Y_RESOLUTION,
+                                             16,
+                                             "xc_lcd",
+                                             LCD_COLOR_WHITE,
+                                             LCD_COLOR_BLACK);
+        }
+        if (display_result != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "Failed to update LCD uptime: %s",
+                     esp_err_to_name(display_result));
+        }
+
+        seconds += 1;
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

@@ -357,6 +357,12 @@ esp_err_t tp_init(void)
         return result;
     }
 
+    /*
+     * 保存 CHSC5432 报告的原始坐标范围，不交换 X/Y，也不做镜像：
+     *
+     *  - TP_X=240：对应屏幕竖直方向，原点在左下角，X 从下向上递增；
+     *  - TP_Y=320：对应屏幕水平方向，Y 从左向右递增。
+     */
     tp_x_resolution = controller_info.tp_x_resolution;
     tp_y_resolution = controller_info.tp_y_resolution;
 
