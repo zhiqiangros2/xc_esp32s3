@@ -10,7 +10,6 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "lcdfont.h"
 #include "spi.h"
 
 #define LCD_CS_GPIO GPIO_NUM_47
@@ -18,6 +17,16 @@
 
 #define LCD_PIXEL_CLOCK_HZ (60U * 1000U * 1000U)
 #define LCD_TRANSFER_LINES 20U
+
+/*
+ * DMA 缓冲区能够保存完整的 240 像素 X 轴，以及连续 20 个 Y 坐标位置：
+ *
+ *     240 * 20 = 4800 个 RGB565 像素
+ *     4800 * sizeof(uint16_t) = 9600 字节
+ *
+ * 全屏或大矩形传输时，驱动会沿 Y 轴分批发送，每批最多使用这块缓冲区
+ * 容纳的数据量，因此不需要为整个 240x320 屏幕分配完整帧缓冲区。
+ */
 #define LCD_TRANSFER_BUFFER_PIXELS (LCD_X_RESOLUTION * LCD_TRANSFER_LINES)
 
 static const char *TAG = "LCD";
@@ -27,13 +36,6 @@ static SemaphoreHandle_t lcd_mutex = NULL;
 static SemaphoreHandle_t lcd_dma_done_semaphore = NULL;
 static uint16_t *lcd_transfer_buffer = NULL;
 static bool lcd_initialized = false;
-
-typedef struct {
-    const unsigned char *bitmap;
-    uint8_t width;
-    uint8_t height;
-    uint8_t bytes_per_row;
-} lcd_ascii_glyph_t;
 
 static uint16_t rgb565_to_wire_order(uint16_t color)
 {
@@ -61,11 +63,11 @@ static bool lcd_color_transfer_done(esp_lcd_panel_io_handle_t panel_io,
 
 static bool lcd_region_is_valid(uint16_t x,
                                 uint16_t y,
-                                uint16_t width,
-                                uint16_t height)
+                                uint16_t height,
+                                uint16_t width)
 {
-    /* 宽或高为 0 时没有可绘制的像素，不是有效区域。 */
-    if (width == 0 || height == 0) {
+    /* 高或宽为 0 时没有可绘制的像素，不是有效区域。 */
+    if (height == 0 || width == 0) {
         return false;
     }
 
@@ -75,129 +77,23 @@ static bool lcd_region_is_valid(uint16_t x,
     }
 
     /*
-     * 从起点到两个坐标轴末端的空间必须足以容纳整个矩形。
-     * 例如 x=220 时，X 轴只剩 20 个像素，因此 width 最大只能是 20。
+     * height 沿 X 轴延伸，width 沿 Y 轴延伸。两个尺寸都不能超过对应
+     * 坐标轴的剩余空间。例如 x=220 时，X 轴只剩 20 个像素，因此
+     * height 最大只能是 20。
      */
-    const uint16_t available_width = LCD_X_RESOLUTION - x;
-    const uint16_t available_height = LCD_Y_RESOLUTION - y;
-    if (width > available_width || height > available_height) {
+    const uint16_t available_height = LCD_X_RESOLUTION - x;
+    const uint16_t available_width = LCD_Y_RESOLUTION - y;
+    if (height > available_height || width > available_width) {
         return false;
     }
 
     return true;
 }
 
-static bool lcd_get_ascii_glyph(char character,
-                                uint8_t font_height,
-                                lcd_ascii_glyph_t *glyph)
-{
-    const unsigned char ascii_code = (unsigned char)character;
-    if (glyph == NULL || ascii_code < 0x20U || ascii_code > 0x7EU) {
-        return false;
-    }
-
-    const size_t glyph_index = ascii_code - 0x20U;
-    switch (font_height) {
-        case 12:
-            glyph->bitmap = asc2_1206[glyph_index];
-            glyph->width = 6;
-            glyph->height = 12;
-            glyph->bytes_per_row = 1;
-            return true;
-
-        case 16:
-            glyph->bitmap = asc2_1608[glyph_index];
-            glyph->width = 8;
-            glyph->height = 16;
-            glyph->bytes_per_row = 1;
-            return true;
-
-        case 24:
-            glyph->bitmap = asc2_2412[glyph_index];
-            glyph->width = 12;
-            glyph->height = 24;
-            glyph->bytes_per_row = 2;
-            return true;
-
-        case 32:
-            glyph->bitmap = asc2_3216[glyph_index];
-            glyph->width = 16;
-            glyph->height = 32;
-            glyph->bytes_per_row = 2;
-            return true;
-
-        default:
-            return false;
-    }
-}
-
-static esp_err_t lcd_show_char_locked(uint16_t x,
-                                      uint16_t y,
-                                      char character,
-                                      uint8_t font_height,
-                                      uint16_t foreground_color,
-                                      uint16_t background_color)
-{
-    lcd_ascii_glyph_t glyph;
-    if (!lcd_get_ascii_glyph(character, font_height, &glyph) ||
-        !lcd_region_is_valid(x, y, glyph.height, glyph.width)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    const uint16_t foreground_in_wire_order =
-        rgb565_to_wire_order(foreground_color);
-    const uint16_t background_in_wire_order =
-        rgb565_to_wire_order(background_color);
-
-    /*
-     * 字模原始数据按“从上到下逐行、每行从左到右”保存。当前 LCD 的 X 轴
-     * 从下向上，Y 轴从左向右，因此显示一个正向字符时需要重新排列像素：
-     *
-     *  - 字模的行映射到 LCD 的 X 轴，并反转顺序，使字模顶部位于较大的 X；
-     *  - 字模的列映射到 LCD 的 Y 轴，保持从左向右的顺序。
-     *
-     * DMA 矩形的 X 方向长度为字符高度，Y 方向长度为字符宽度。这样字符
-     * 保持正向显示，后续字符串可以沿 Y 轴从左向右排列。
-     */
-    for (uint8_t y_offset = 0; y_offset < glyph.width; ++y_offset) {
-        for (uint8_t x_offset = 0; x_offset < glyph.height; ++x_offset) {
-            const uint8_t source_row = glyph.height - 1U - x_offset;
-            const uint8_t source_column = y_offset;
-            const size_t byte_index =
-                (size_t)source_row * glyph.bytes_per_row + source_column / 8U;
-            const uint8_t bit_mask =
-                (uint8_t)(0x80U >> (source_column % 8U));
-            const bool pixel_is_foreground =
-                (glyph.bitmap[byte_index] & bit_mask) != 0;
-
-            lcd_transfer_buffer[(size_t)y_offset * glyph.height + x_offset] =
-                pixel_is_foreground ? foreground_in_wire_order
-                                    : background_in_wire_order;
-        }
-    }
-
-    /* 清除旧通知，随后提交本字符的整块像素并等待 DMA 完成。 */
-    while (xSemaphoreTake(lcd_dma_done_semaphore, 0) == pdTRUE) {
-    }
-
-    esp_err_t result = esp_lcd_panel_draw_bitmap(lcd_panel_handle,
-                                                  x,
-                                                  y,
-                                                  x + glyph.height,
-                                                  y + glyph.width,
-                                                  lcd_transfer_buffer);
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
-    return ESP_OK;
-}
-
 static esp_err_t lcd_fill_rect_locked(uint16_t x,
                                       uint16_t y,
-                                      uint16_t width,
                                       uint16_t height,
+                                      uint16_t width,
                                       uint16_t color)
 {
     /*
@@ -217,21 +113,22 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
     }
 
     /*
-     * DMA 缓冲区容量以“像素数”表示。用容量除以矩形宽度，可以得到一次
-     * 传输最多容纳多少个完整行。例如缓冲区有 4800 个像素、X 方向长度为 240，
-     * 则每次最多传输 20 行。
+     * DMA 缓冲区容量以“像素数”表示。每个 Y 坐标位置包含 height 个沿
+     * X 轴排列的像素，因此用容量除以 height，可以得到一次传输最多覆盖
+     * 多少个 Y 坐标。例如缓冲区有 4800 个像素、height=240 时，一次最多
+     * 传输 20 个 Y 坐标位置。
      */
-    const uint16_t maximum_rows_per_transfer =
-        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / width);
+    const uint16_t maximum_y_pixels_per_transfer =
+        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / height);
 
     uint16_t current_transfer_y = y;
-    uint16_t rows_left_to_transfer = height;
+    uint16_t y_pixels_left_to_transfer = width;
 
     /* Y 方向长度超过单次传输容量时，沿 Y 轴拆成多批发送。 */
-    while (rows_left_to_transfer > 0) {
-        uint16_t rows_this_transfer = rows_left_to_transfer;
-        if (rows_this_transfer > maximum_rows_per_transfer) {
-            rows_this_transfer = maximum_rows_per_transfer;
+    while (y_pixels_left_to_transfer > 0) {
+        uint16_t y_pixels_this_transfer = y_pixels_left_to_transfer;
+        if (y_pixels_this_transfer > maximum_y_pixels_per_transfer) {
+            y_pixels_this_transfer = maximum_y_pixels_per_transfer;
         }
 
         /* 清除旧的完成通知，确保下面等待的是当前这批 DMA 传输。 */
@@ -242,8 +139,8 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
             lcd_panel_handle,
             x,
             current_transfer_y,
-            x + width,
-            current_transfer_y + rows_this_transfer,
+            x + height,
+            current_transfer_y + y_pixels_this_transfer,
             lcd_transfer_buffer);
         if (result != ESP_OK) {
             return result;
@@ -252,9 +149,9 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
         /* DMA 完成后才能复用 lcd_transfer_buffer 发送下一批数据。 */
         xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
 
-        /* 下一批紧接在本批下方，直到目标矩形的所有行都发送完成。 */
-        current_transfer_y += rows_this_transfer;
-        rows_left_to_transfer -= rows_this_transfer;
+        /* 下一批紧接当前 Y 区间，直到矩形在 Y 方向的像素全部发送完成。 */
+        current_transfer_y += y_pixels_this_transfer;
+        y_pixels_left_to_transfer -= y_pixels_this_transfer;
     }
 
     return ESP_OK;
@@ -486,156 +383,84 @@ esp_err_t lcd_clear(uint16_t color)
 
 esp_err_t lcd_fill_rect(uint16_t x,
                         uint16_t y,
-                        uint16_t width,
                         uint16_t height,
+                        uint16_t width,
                         uint16_t color)
 {
     if (!lcd_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!lcd_region_is_valid(x, y, width, height)) {
+    if (!lcd_region_is_valid(x, y, height, width)) {
         return ESP_ERR_INVALID_ARG;
     }
 
     xSemaphoreTake(lcd_mutex, portMAX_DELAY);
-    esp_err_t result = lcd_fill_rect_locked(x, y, width, height, color);
+    esp_err_t result = lcd_fill_rect_locked(x, y, height, width, color);
     xSemaphoreGive(lcd_mutex);
     return result;
 }
 
-esp_err_t lcd_show_char(uint16_t x,
-                        uint16_t y,
-                        char character,
-                        uint8_t font_height,
-                        uint16_t foreground_color,
-                        uint16_t background_color)
-{
-    if (!lcd_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    lcd_ascii_glyph_t glyph;
-    if (!lcd_get_ascii_glyph(character, font_height, &glyph) ||
-        !lcd_region_is_valid(x, y, glyph.height, glyph.width)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    xSemaphoreTake(lcd_mutex, portMAX_DELAY);
-    esp_err_t result = lcd_show_char_locked(x,
-                                             y,
-                                             character,
-                                             font_height,
-                                             foreground_color,
-                                             background_color);
-    xSemaphoreGive(lcd_mutex);
-    return result;
-}
-
-esp_err_t lcd_show_string(uint16_t x,
+esp_err_t lcd_draw_pixels(uint16_t x,
                           uint16_t y,
-                          uint16_t x_size,
-                          uint16_t y_size,
-                          uint8_t font_height,
-                          const char *text,
-                          uint16_t foreground_color,
-                          uint16_t background_color)
+                          uint16_t height,
+                          uint16_t width,
+                          const uint16_t *pixels)
 {
     if (!lcd_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (text == NULL || !lcd_region_is_valid(x, y, x_size, y_size)) {
+    if (pixels == NULL || !lcd_region_is_valid(x, y, height, width)) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    lcd_ascii_glyph_t glyph;
-    if (!lcd_get_ascii_glyph(' ', font_height, &glyph)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (x_size < glyph.height || y_size < glyph.width) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    /* 先检查完整字符串，避免绘制一半后才发现不支持的字符。 */
-    for (const char *current = text; *current != '\0'; ++current) {
-        const unsigned char character = (unsigned char)*current;
-        if (character != '\n' && character != '\r' &&
-            (character < 0x20U || character > 0x7EU)) {
-            return ESP_ERR_INVALID_ARG;
-        }
-    }
-
-    const uint32_t text_area_x_end = (uint32_t)x + x_size;
-    const uint32_t text_area_y_end = (uint32_t)y + y_size;
-    uint32_t character_x = x;
-    uint32_t character_y = y;
+    /* 每个 Y 坐标包含 height 个连续的 X 方向像素。 */
+    const uint16_t maximum_y_pixels_per_transfer =
+        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / height);
+    uint16_t current_transfer_y = y;
+    uint16_t y_pixels_left_to_transfer = width;
+    size_t source_pixel_index = 0;
+    esp_err_t result = ESP_OK;
 
     xSemaphoreTake(lcd_mutex, portMAX_DELAY);
 
-    esp_err_t result = ESP_OK;
-    for (const char *current = text; *current != '\0'; ++current) {
-        if (*current == '\r') {
-            continue;
+    while (y_pixels_left_to_transfer > 0) {
+        uint16_t y_pixels_this_transfer = y_pixels_left_to_transfer;
+        if (y_pixels_this_transfer > maximum_y_pixels_per_transfer) {
+            y_pixels_this_transfer = maximum_y_pixels_per_transfer;
         }
 
-        if (*current == '\n') {
-            character_x += glyph.height;
-            character_y = y;
-            continue;
+        const size_t pixels_this_transfer =
+            (size_t)height * y_pixels_this_transfer;
+        for (size_t pixel_index = 0;
+             pixel_index < pixels_this_transfer;
+             ++pixel_index) {
+            lcd_transfer_buffer[pixel_index] =
+                rgb565_to_wire_order(pixels[source_pixel_index + pixel_index]);
         }
 
-        /* Y 轴剩余空间放不下一个完整字符时，沿 X 轴换到下一行。 */
-        if (character_y + glyph.width > text_area_y_end) {
-            character_x += glyph.height;
-            character_y = y;
+        /* 清除旧通知，确保下面等待的是当前这次 DMA 传输。 */
+        while (xSemaphoreTake(lcd_dma_done_semaphore, 0) == pdTRUE) {
         }
 
-        /* X 轴剩余空间不足一整行时停止，绝不绘制被截断的字符。 */
-        if (character_x + glyph.height > text_area_x_end) {
-            break;
-        }
-
-        result = lcd_show_char_locked((uint16_t)character_x,
-                                      (uint16_t)character_y,
-                                      *current,
-                                      font_height,
-                                      foreground_color,
-                                      background_color);
+        result = esp_lcd_panel_draw_bitmap(
+            lcd_panel_handle,
+            x,
+            current_transfer_y,
+            x + height,
+            current_transfer_y + y_pixels_this_transfer,
+            lcd_transfer_buffer);
         if (result != ESP_OK) {
             break;
         }
 
-        character_y += glyph.width;
+        /* DMA 完成后才能改写共享传输缓冲区。 */
+        xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
+
+        current_transfer_y += y_pixels_this_transfer;
+        y_pixels_left_to_transfer -= y_pixels_this_transfer;
+        source_pixel_index += pixels_this_transfer;
     }
 
     xSemaphoreGive(lcd_mutex);
     return result;
-}
-
-esp_err_t lcd_show_test_pattern(void)
-{
-    static const uint16_t colors[] = {
-        LCD_COLOR_WHITE,
-        LCD_COLOR_YELLOW,
-        LCD_COLOR_CYAN,
-        LCD_COLOR_GREEN,
-        LCD_COLOR_MAGENTA,
-        LCD_COLOR_RED,
-        LCD_COLOR_BLUE,
-        LCD_COLOR_BLACK,
-    };
-    const uint16_t bar_y_size =
-        LCD_Y_RESOLUTION / (sizeof(colors) / sizeof(colors[0]));
-
-    for (size_t i = 0; i < sizeof(colors) / sizeof(colors[0]); ++i) {
-        esp_err_t result = lcd_fill_rect(0,
-                                         (uint16_t)(i * bar_y_size),
-                                         LCD_X_RESOLUTION,
-                                         bar_y_size,
-                                         colors[i]);
-        if (result != ESP_OK) {
-            return result;
-        }
-    }
-
-    return ESP_OK;
 }

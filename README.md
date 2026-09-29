@@ -106,7 +106,8 @@ GPIO42。`interrupt_manager.c/.h` 独占该 GPIO 的 ISR；ISR 只通知 FreeRTO
 ### LCD 驱动
 
 `spi.c/.h` 负责 SPI2 总线初始化、板级引脚和 DMA 内存管理；`lcd.c/.h` 使用
-ESP-IDF 的 `esp_lcd` ST7789 驱动。屏幕以 60 MHz、SPI 模式 0 工作，逻辑分辨率
+ESP-IDF 的 `esp_lcd` ST7789 驱动并提供基础绘图接口；`display.c/.h` 负责 ASCII
+字模、字符串排版和测试色条。屏幕以 60 MHz、SPI 模式 0 工作，逻辑分辨率
 使用 X=240、Y=320 原生地址，物理原点位于左下角，横轴为 Y。LCD 的 RESX 通过
 `ESP_LCD_RESET` 网络与 ESP32-S3 的
 `CHIP_PU` 共用，不能作为独立 GPIO 控制，因此面板驱动使用 ST7789 软件复位；背光
@@ -121,6 +122,8 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动。屏幕以 60 MHz、SPI 模式 0 工作，�
 - `lcd_backlight_set()`：打开或关闭背光。
 - `lcd_clear()`：使用一个 RGB565 颜色清除整个屏幕。
 - `lcd_fill_rect()`：填充指定矩形区域。
+- `lcd_show_char()`：显示一个可打印 ASCII 字符。
+- `lcd_show_string()`：在指定矩形区域内显示 ASCII 字符串。
 - `lcd_show_test_pattern()`：显示八色竖向测试条。
 
 ### 触摸驱动

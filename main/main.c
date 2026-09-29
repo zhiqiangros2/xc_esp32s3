@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "aw9523b.h"
+#include "display.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_heap_caps.h"
@@ -142,9 +143,17 @@ void app_main(void)
                                              LCD_COLOR_WHITE,
                                              LCD_COLOR_BLACK);
         }
+        if (display_result == ESP_OK) {
+            display_result = lcd_show_char(40,
+                                           0,
+                                           'A',
+                                           16,
+                                           LCD_COLOR_WHITE,
+                                           LCD_COLOR_BLACK);
+        }
         if (display_result != ESP_OK) {
             ESP_LOGE(TAG,
-                     "Failed to update LCD uptime: %s",
+                     "Failed to update LCD content: %s",
                      esp_err_to_name(display_result));
         }
 
