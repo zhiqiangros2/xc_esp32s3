@@ -112,9 +112,7 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动。屏幕以 60 MHz、SPI 模式 0 工作，�
 通过 AW9523B P1_0 控制，并按低电平有效逻辑封装为 `lcd_backlight_set()`。
 
 驱动使用 20 行 DMA 暂存区分块刷新，并等待每次异步 SPI 传输完成后才复用缓冲区。
-`lcd_draw_bitmap()` 接收 CPU 原生字节序的 RGB565 `uint16_t` 像素，内部会转换为
-ST7789 所需的大端线上字节序。区域必须完全位于屏幕范围内，越界或空区域返回
-`ESP_ERR_INVALID_ARG`。
+填充区域必须完全位于屏幕范围内，越界或空区域返回 `ESP_ERR_INVALID_ARG`。
 
 可用接口：
 
@@ -122,7 +120,6 @@ ST7789 所需的大端线上字节序。区域必须完全位于屏幕范围内�
 - `lcd_backlight_set()`：打开或关闭背光。
 - `lcd_clear()`：使用一个 RGB565 颜色清屏。
 - `lcd_fill_rect()`：填充指定矩形区域。
-- `lcd_draw_bitmap()`：显示行优先 RGB565 位图。
 - `lcd_show_test_pattern()`：显示八色竖向测试条。
 
 ### 触摸驱动

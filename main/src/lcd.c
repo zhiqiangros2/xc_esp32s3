@@ -51,38 +51,32 @@ static bool lcd_color_transfer_done(esp_lcd_panel_io_handle_t panel_io,
     return task_woken == pdTRUE;
 }
 
-static esp_err_t lcd_transfer_locked(uint16_t x,
-                                     uint16_t y,
-                                     uint16_t width,
-                                     uint16_t height)
-{
-    /* 清除可能残留的旧完成通知，确保后续等待对应本次 DMA 传输。 */
-    while (xSemaphoreTake(lcd_dma_done_semaphore, 0) == pdTRUE) {
-    }
-
-    esp_err_t result = esp_lcd_panel_draw_bitmap(lcd_panel_handle,
-                                                  x,
-                                                  y,
-                                                  x + width,
-                                                  y + height,
-                                                  lcd_transfer_buffer);
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    /* 等待本次 DMA 传输完成，防止 SPI 使用期间改写传输缓冲区。 */
-    xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
-    return ESP_OK;
-}
-
 static bool lcd_region_is_valid(uint16_t x,
                                 uint16_t y,
                                 uint16_t width,
                                 uint16_t height)
 {
-    return width != 0 && height != 0 &&
-           x < LCD_WIDTH_320 && y < LCD_HEIGHT_240 &&
-           width <= LCD_WIDTH_320 - x && height <= LCD_HEIGHT_240 - y;
+    /* 宽或高为 0 时没有可绘制的像素，不是有效区域。 */
+    if (width == 0 || height == 0) {
+        return false;
+    }
+
+    /* 左上角起点必须位于屏幕范围内。 */
+    if (x >= LCD_WIDTH_320 || y >= LCD_HEIGHT_240) {
+        return false;
+    }
+
+    /*
+     * 从起点到屏幕右边、下边的空间必须足以容纳整个矩形。
+     * 例如 x=300 时，右侧只剩 20 个像素，因此 width 最大只能是 20。
+     */
+    const uint16_t available_width = LCD_WIDTH_320 - x;
+    const uint16_t available_height = LCD_HEIGHT_240 - y;
+    if (width > available_width || height > available_height) {
+        return false;
+    }
+
+    return true;
 }
 
 static esp_err_t lcd_fill_rect_locked(uint16_t x,
@@ -91,25 +85,61 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
                                       uint16_t height,
                                       uint16_t color)
 {
-    const size_t rows_per_transfer = LCD_TRANSFER_BUFFER_PIXELS / width;
-    const uint16_t wire_color = rgb565_to_wire_order(color);
+    /*
+     * ESP32 内存中的 RGB565 是小端字节序，而 ST7789 在线路上要求先发送
+     * 高字节。先交换颜色的两个字节，DMA 发送时就不需要再次转换。
+     */
+    const uint16_t color_in_wire_order = rgb565_to_wire_order(color);
 
-    for (size_t i = 0; i < LCD_TRANSFER_BUFFER_PIXELS; ++i) {
-        lcd_transfer_buffer[i] = wire_color;
+    /*
+     * 当前操作是纯色填充，缓冲区中的每个像素都相同。因此只需在发送前把
+     * 整个 DMA 缓冲区填充一次，后面的每批传输可以重复使用同一块数据。
+     */
+    for (size_t pixel_index = 0;
+         pixel_index < LCD_TRANSFER_BUFFER_PIXELS;
+         ++pixel_index) {
+        lcd_transfer_buffer[pixel_index] = color_in_wire_order;
     }
 
-    uint16_t current_y = y;
-    uint16_t remaining_rows = height;
-    while (remaining_rows != 0) {
-        const uint16_t rows = remaining_rows < rows_per_transfer
-                                  ? remaining_rows
-                                  : (uint16_t)rows_per_transfer;
-        esp_err_t result = lcd_transfer_locked(x, current_y, width, rows);
+    /*
+     * DMA 缓冲区容量以“像素数”表示。用容量除以矩形宽度，可以得到一次
+     * 传输最多容纳多少个完整行。例如缓冲区有 6400 个像素、矩形宽 320，
+     * 则每次最多传输 20 行。
+     */
+    const uint16_t maximum_rows_per_transfer =
+        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / width);
+
+    uint16_t current_transfer_y = y;
+    uint16_t rows_left_to_transfer = height;
+
+    /* 矩形高于单次传输容量时，将它从上到下拆成多批发送。 */
+    while (rows_left_to_transfer > 0) {
+        uint16_t rows_this_transfer = rows_left_to_transfer;
+        if (rows_this_transfer > maximum_rows_per_transfer) {
+            rows_this_transfer = maximum_rows_per_transfer;
+        }
+
+        /* 清除旧的完成通知，确保下面等待的是当前这批 DMA 传输。 */
+        while (xSemaphoreTake(lcd_dma_done_semaphore, 0) == pdTRUE) {
+        }
+
+        esp_err_t result = esp_lcd_panel_draw_bitmap(
+            lcd_panel_handle,
+            x,
+            current_transfer_y,
+            x + width,
+            current_transfer_y + rows_this_transfer,
+            lcd_transfer_buffer);
         if (result != ESP_OK) {
             return result;
         }
-        current_y += rows;
-        remaining_rows -= rows;
+
+        /* DMA 完成后才能复用 lcd_transfer_buffer 发送下一批数据。 */
+        xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
+
+        /* 下一批紧接在本批下方，直到目标矩形的所有行都发送完成。 */
+        current_transfer_y += rows_this_transfer;
+        rows_left_to_transfer -= rows_this_transfer;
     }
 
     return ESP_OK;
@@ -261,14 +291,21 @@ esp_err_t lcd_init(void)
         result = esp_lcd_panel_invert_color(lcd_panel_handle, true);
     }
 
+    #if 1
     /*
-     * 交换 X/Y 地址轴，将控制器默认的 240x320 竖屏坐标转换为 320x240 横屏坐标。
-     * ESP-IDF 会修改 ST7789 MADCTL 寄存器中的 MV 位。
+     * ST7789 原生采用竖屏显存坐标：X 范围为 0~239，Y 范围为 0~319。
+     * 传入 true 后，ESP-IDF 设置 MADCTL.MV（行列交换）位，使控制器交换
+     * 行地址和列地址。此后 LCD 绘图接口使用横屏坐标：X 范围为 0~319，
+     * Y 范围为 0~239。
+     *
+     * 该设置只改变 LCD 显存的寻址方向，不转换触摸坐标，也不修改像素数据。
      */
     if (result == ESP_OK) {
         result = esp_lcd_panel_swap_xy(lcd_panel_handle, true);
     }
+    #endif
 
+    #if 0
     /*
      * X 轴保持不镜像，Y 轴镜像，使横屏坐标方向与 BOX3 屏幕的实际安装方向一致。
      * ESP-IDF 会据此设置 ST7789 MADCTL 寄存器中的 MX/MY 位。
@@ -276,6 +313,8 @@ esp_err_t lcd_init(void)
     if (result == ESP_OK) {
         result = esp_lcd_panel_mirror(lcd_panel_handle, false, true);
     }
+    #endif
+
     /* 显示开启前先清成黑色，避免背光点亮时出现旧显存内容。 */
     if (result == ESP_OK) {
         xSemaphoreTake(lcd_mutex, portMAX_DELAY);
@@ -340,49 +379,6 @@ esp_err_t lcd_fill_rect(uint16_t x,
     xSemaphoreTake(lcd_mutex, portMAX_DELAY);
     esp_err_t result = lcd_fill_rect_locked(x, y, width, height, color);
     xSemaphoreGive(lcd_mutex);
-    return result;
-}
-
-esp_err_t lcd_draw_bitmap(uint16_t x,
-                          uint16_t y,
-                          uint16_t width,
-                          uint16_t height,
-                          const uint16_t *pixels)
-{
-    if (!lcd_initialized) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (pixels == NULL || !lcd_region_is_valid(x, y, width, height)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    const size_t rows_per_transfer = LCD_TRANSFER_BUFFER_PIXELS / width;
-    uint16_t current_y = y;
-    uint16_t remaining_rows = height;
-    const uint16_t *source = pixels;
-    esp_err_t result = ESP_OK;
-
-    xSemaphoreTake(lcd_mutex, portMAX_DELAY);
-    while (remaining_rows != 0) {
-        const uint16_t rows = remaining_rows < rows_per_transfer
-                                  ? remaining_rows
-                                  : (uint16_t)rows_per_transfer;
-        const size_t pixel_count = (size_t)width * rows;
-        for (size_t i = 0; i < pixel_count; ++i) {
-            lcd_transfer_buffer[i] = rgb565_to_wire_order(source[i]);
-        }
-
-        result = lcd_transfer_locked(x, current_y, width, rows);
-        if (result != ESP_OK) {
-            break;
-        }
-
-        source += pixel_count;
-        current_y += rows;
-        remaining_rows -= rows;
-    }
-    xSemaphoreGive(lcd_mutex);
-
     return result;
 }
 

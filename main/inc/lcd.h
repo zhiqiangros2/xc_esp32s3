@@ -40,16 +40,6 @@ esp_err_t lcd_fill_rect(uint16_t x,
                         uint16_t height,
                         uint16_t color);
 
-/**
- * Draw a row-major RGB565 bitmap. Pixel values use CPU-native uint16_t byte
- * order; the driver converts them to the ST7789 wire byte order.
- */
-esp_err_t lcd_draw_bitmap(uint16_t x,
-                          uint16_t y,
-                          uint16_t width,
-                          uint16_t height,
-                          const uint16_t *pixels);
-
 /** Draw eight vertical color bars for a quick hardware check. */
 esp_err_t lcd_show_test_pattern(void);
 
