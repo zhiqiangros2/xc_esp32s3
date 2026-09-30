@@ -14,6 +14,8 @@
 #include "key_interrupt.h"
 #include "lcd.h"
 #include "littlefs.h"
+#include "lvgl_port.h"
+#include "lvgl_ui.h"
 #include "nvs_flash.h"
 #include "sd_fatfs.h"
 #include "spi.h"
@@ -23,6 +25,8 @@ static const char *TAG = "BOX3";
 
 void app_main(void)
 {
+    vTaskDelay(pdMS_TO_TICKS(5000));
+
     /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
@@ -30,9 +34,8 @@ void app_main(void)
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
-    ESP_ERROR_CHECK(err);
 
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    ESP_ERROR_CHECK(err);
 
     bsp_info_print();
 
@@ -67,12 +70,8 @@ void app_main(void)
      */
     ESP_ERROR_CHECK(board_spi_init(BOARD_SPI_MAX_TRANSFER_SIZE));
 
-    /*
-     * 基础外设就绪后初始化 LCD，并显示八色竖向测试色条，用于检查屏幕
-     * 刷新、RGB565 颜色以及横屏显示方向是否正常。
-     */
+    /* 基础外设就绪后初始化 320x240 标准横屏坐标的 LCD。 */
     ESP_ERROR_CHECK(lcd_init());
-    ESP_ERROR_CHECK(lcd_show_test_pattern());
 
     /* SD 与 LCD 共用 SPI2；SD 挂载失败时只记录警告，不影响其他功能。 */
     esp_err_t sd_result = sd_init();
@@ -122,7 +121,24 @@ void app_main(void)
                  esp_err_to_name(littlefs_result));
     }
 
+#if 0
+    /*
+     * LVGL 接入前使用的直接 LCD 绘图示例保留在本代码块中。当前 #if 1
+     * 表示启用直接 LCD 测试；由于下面包含无限循环，程序不会继续执行后面的
+     * LVGL 初始化。字符显示验证完成后改回 #if 0，即可恢复 LVGL 界面。
+     */
+
+    /*
+     * 旧版 LCD 八色测试图代码保留在这里。LVGL 接管屏幕时必须关闭，避免
+     * LVGL 刷新任务和直接 LCD 绘图同时修改画面。
+     */
+    ESP_ERROR_CHECK(lcd_show_test_pattern());
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+
     ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_GREEN));
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
     uint32_t seconds = 0;
     char uptime_text[40];
     while (true) {
@@ -131,33 +147,40 @@ void app_main(void)
                  "Hello World - uptime: %u s",
                  (unsigned)seconds);
 
-        /* 每次刷新前清除第一行，避免较短的新内容后面残留旧字符。 */
+        /*
+         * 每次刷新前清除屏幕顶部一整行。标准坐标中 width 沿 X 轴水平
+         * 向右，所以宽度使用 320；height 沿 Y 轴竖直向下，所以高度为 16。
+         */
         esp_err_t display_result = lcd_fill_rect(0,
                                                   0,
+                                                  LCD_X_RESOLUTION,
                                                   16,
-                                                  LCD_Y_RESOLUTION,
                                                   LCD_COLOR_WHITE);
+
         if (display_result == ESP_OK) {
+            /* 在 Y=0 的第一行中，从左向右显示运行时间。 */
             display_result = lcd_show_string(0,
                                              0,
+                                             LCD_X_RESOLUTION,
                                              16,
-                                             LCD_Y_RESOLUTION,
                                              16,
                                              uptime_text,
                                              LCD_COLOR_BLACK);
         }
         if (display_result == ESP_OK) {
-            display_result = lcd_show_string(20,
-                                             0,
+            /* 在 Y=20 的第二行中，从屏幕左侧显示 xc_lcd。 */
+            display_result = lcd_show_string(0,
+                                             20,
+                                             LCD_X_RESOLUTION,
                                              16,
-                                             LCD_Y_RESOLUTION,
                                              16,
                                              "xc_lcd",
                                              LCD_COLOR_BLACK);
         }
         if (display_result == ESP_OK) {
-            display_result = lcd_show_char(40,
-                                           0,
+            /* 在 Y=40 的第三行左侧显示单个字符 A。 */
+            display_result = lcd_show_char(0,
+                                           40,
                                            'A',
                                            16,
                                            LCD_COLOR_BLACK);
@@ -171,4 +194,89 @@ void app_main(void)
         seconds += 1;
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
+
+#else
+
+    /*
+     * 将 LCD 显示和 CHSC5432 触摸接入 LVGL，然后创建按钮界面。LCD、
+     * CHSC5432 和 LVGL 三者的坐标方向及对应关系如下。
+     *
+     * 1. LCD 逻辑坐标：320x240。
+     *
+     *        (0,0) ----------------------> LCD_X，范围 0~319
+     *          |
+     *          |
+     *          v
+     *        LCD_Y，范围 0~239
+     *
+     *    LCD 原点位于屏幕左上角，LCD_X 从左向右递增，LCD_Y 从上向下递增。
+     *
+     * 2. CHSC5432 原始触摸坐标：240x320。
+     *
+     *                       TP_RAW_X，范围 0~239
+     *                                ^
+     *                                |
+     *                                |
+     *        (0,0) ------------------+------> TP_RAW_Y，范围 0~319
+     *
+     *    触摸原点位于屏幕左下角。TP_RAW_X 对应屏幕竖直方向，从下向上
+     *    递增；TP_RAW_Y 对应屏幕水平方向，从左向右递增。
+     *
+     * 3. LVGL 坐标：320x240。
+     *
+     *        (0,0) ----------------------> LVGL_X，范围 0~319
+     *          |
+     *          |
+     *          v
+     *        LVGL_Y，范围 0~239
+     *
+     *    LVGL 原点位于屏幕左上角，LVGL_X 从左向右递增，LVGL_Y 从上向下
+     *    递增，与 LCD 逻辑坐标完全相同。
+     *
+     * 显示关系：LVGL 绘制区域直接传给 LCD，不需要交换或反转坐标。
+     *
+     *        LCD_X = LVGL_X
+     *        LCD_Y = LVGL_Y
+     *
+     * 触摸关系：tp.c 将 CHSC5432 原始坐标转换为 LVGL/LCD 坐标。
+     *
+     *    CHSC5432 原始坐标                      LCD/LVGL 转换后坐标
+     *
+     *           TP_RAW_X=239                   (0,0) ---------> X=319
+     *                ^                            |
+     *                |                            |
+     *                |                            v
+     *       (0,0) ---+---> TP_RAW_Y=319          Y=239
+     *
+     *                 坐标交换，并反转竖直方向
+     *       (TP_RAW_X, TP_RAW_Y) --------------> (X, Y)
+     *
+     *        LVGL_X = LCD_X = TP_RAW_Y
+     *        LVGL_Y = LCD_Y = 239 - TP_RAW_X
+     *
+     *    四个角点的转换结果：
+     *
+     *        原始左上角 (239,   0) -> 转换后左上角 (  0,   0)
+     *        原始右上角 (239, 319) -> 转换后右上角 (319,   0)
+     *        原始左下角 (  0,   0) -> 转换后左下角 (  0, 239)
+     *        原始右下角 (  0, 319) -> 转换后右下角 (319, 239)
+     *
+     * 交换 TP_RAW_X/TP_RAW_Y 是因为触摸原始 X 是竖直轴，而 LCD/LVGL 的
+     * X 是水平轴；用 239 减 TP_RAW_X 是为了把竖直原点从左下角转换到
+     * 左上角。转换后，触摸位置与屏幕上对应的 LVGL 控件坐标一致。
+     *
+     * CHSC5432 的 I2C 读取只在 GPIO42 中断管理任务中执行。触摸驱动完成
+     * 坐标转换后，把完整状态发送到 FreeRTOS 消息队列；独立触摸任务永久
+     * 阻塞等待队列，收到消息后获取 LVGL 全局互斥锁并直接上报输入状态。
+     * 主 LVGL 任务只负责定时器和显示刷新，不会周期轮询 I2C。
+     */
+    ESP_ERROR_CHECK(lvgl_port_init());
+    ESP_ERROR_CHECK(lvgl_ui_init());
+
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+#endif
+
 }

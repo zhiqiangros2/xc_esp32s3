@@ -12,6 +12,7 @@
 #include "aw9523b.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "i2c.h"
@@ -23,7 +24,6 @@
 #define TP_CONFIG_INFO_ADDRESS_0x20000080 0x20000080UL
 #define TP_EVENT_ADDRESS_0x2000002C 0x2000002CUL
 #define TP_CONFIG_INFO_DATA_SIZE 15U
-#define TP_EVENT_DATA_SIZE 28U
 #define TP_POINT_DATA_SIZE 5U
 
 #define TP_CONFIG_IC_TYPE_OFFSET 0U
@@ -40,10 +40,12 @@
 
 #define TP_RESET_LOW_DELAY_MS 100
 #define TP_RESET_BOOT_DELAY_MS 100
+#define TP_STATE_QUEUE_LENGTH 8U
 
 static const char *TAG = "TP";
 static board_i2c_device_handle_t tp_device_handle = NULL;
 static SemaphoreHandle_t tp_mutex = NULL;
+static QueueHandle_t tp_state_queue = NULL;
 static bool tp_initialized = false;
 static uint8_t previous_point_count = 0;
 static uint16_t tp_x_resolution = 0;
@@ -197,17 +199,49 @@ static void release_init_resources(void)
         vSemaphoreDelete(tp_mutex);
         tp_mutex = NULL;
     }
+    if (tp_state_queue != NULL) {
+        vQueueDelete(tp_state_queue);
+        tp_state_queue = NULL;
+    }
 
     tp_x_resolution = 0;
     tp_y_resolution = 0;
     previous_point_count = 0;
 }
 
+/** 把中断任务解析出的完整触摸状态发送到 LVGL 使用的消息队列。 */
+static void send_touch_state(const tp_state_t *state)
+{
+    if (state == NULL || tp_state_queue == NULL) {
+        return;
+    }
+
+    /*
+     * 中断管理代码运行在普通 FreeRTOS 任务中，不在 GPIO ISR 中，因此使用
+     * xQueueSend()。等待时间为 0，避免 LVGL 暂时没有消费消息时阻塞中断任务。
+     */
+    if (xQueueSend(tp_state_queue, state, 0) == pdTRUE) {
+        return;
+    }
+
+    /*
+     * 队列已满说明 LVGL 处理速度暂时落后。丢弃最旧的一帧，再加入最新状态，
+     * 防止 LVGL 最终停留在过时的“按下”状态。队列长度为 8，正常情况下不会
+     * 进入这里。
+    */
+    tp_state_t oldest_state;
+    (void)xQueueReceive(tp_state_queue, &oldest_state, 0);
+    if (xQueueSend(tp_state_queue, state, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "Failed to enqueue latest touch state");
+    }
+}
+
 /**
- * @brief 解析 CHSC5432 的 28 字节事件帧并输出原始触摸坐标。
+ * @brief 解析 CHSC5432 的 28 字节事件帧并输出 LCD/LVGL 触摸坐标。
  *
- * @details tp_read() 先以大端序写入事件地址 0x2000002C，再通过 repeated
- * START 切换到读方向，连续读取 28 字节，最后以 NACK 和 STOP 结束事务。
+ * @details tp_read_event_frame() 先以大端序写入事件地址 0x2000002C，再通过
+ * repeated START 切换到读方向，连续读取 28 字节，最后以 NACK 和 STOP
+ * 结束事务。
  *
  * 事件帧布局：
  *
@@ -233,13 +267,22 @@ static void release_init_resources(void)
  *  raw_y = ((event_data[base + 3] >> 4) << 8) | event_data[base + 1]
  *
  * @param[in] event_data 从 0x2000002C 读取的 28 字节事件帧。
- * @param[out] state 有效触点数量及对应的原始 X/Y 坐标。
- * @return ESP_OK 解析成功；触点数超过 5 时返回 ESP_ERR_INVALID_RESPONSE。
- * @note 输出坐标不进行旋转、镜像或 LCD 坐标转换。
+ * @param[in] event_data_size event_data 缓冲区容量，不能小于 28 字节。
+ * @param[out] state 有效触点数量及转换后的 LCD/LVGL X/Y 坐标。
+ * @return ESP_OK 解析成功；参数或缓冲区容量无效时返回 ESP_ERR_INVALID_ARG；
+ * 触点数超过 5 时返回 ESP_ERR_INVALID_RESPONSE。
+ * @note CHSC5432 原始坐标会转换为左上原点、X 向右、Y 向下的 320x240 坐标。
  */
 static esp_err_t parse_touch_event(const uint8_t *event_data,
+                                   size_t event_data_size,
                                    tp_state_t *state)
 {
+    /* 至少需要完整的 28 字节事件帧，才能安全访问 event_data[0..27]。 */
+    if (event_data == NULL || event_data_size < TP_EVENT_DATA_SIZE ||
+        state == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     /* 先清空输出，确保无触摸或所有触点越界时 point_count 为 0。 */
     memset(state, 0, sizeof(*state));
 
@@ -294,9 +337,29 @@ static esp_err_t parse_touch_event(const uint8_t *event_data,
         const uint8_t valid_index = state->point_count;
         tp_point_t *point = &state->points[valid_index];
 
-        /* 不做屏幕方向转换，直接输出触摸控制器的原始坐标。 */
-        point->x = raw_x;
-        point->y = raw_y;
+        /*
+         * 触摸关系：将 CHSC5432 原始坐标转换为 LVGL/LCD 坐标。
+         *
+         *    CHSC5432 原始坐标                      LCD/LVGL 转换后坐标
+         *
+         *           TP_RAW_X=239                   (0,0) ---------> X=319
+         *                ^                            |
+         *                |                            |
+         *                |                            v
+         *       (0,0) ---+---> TP_RAW_Y=319          Y=239
+         *
+         *                 坐标交换，并反转竖直方向
+         *       (TP_RAW_X, TP_RAW_Y) --------------> (X, Y)
+         *
+         *        LVGL_X = LCD_X = TP_RAW_Y
+         *        LVGL_Y = LCD_Y = 239 - TP_RAW_X
+         *
+         * 本函数中的 raw_x、raw_y 分别对应图中的 TP_RAW_X、TP_RAW_Y。
+         * 实现使用初始化时从芯片读取的 tp_x_resolution - 1，而不是写死
+         * 239；本板 tp_x_resolution=240，因此计算结果与上式完全相同。
+         */
+        point->x = raw_y;
+        point->y = (uint16_t)(tp_x_resolution - 1U - raw_x);
 
         /* 每个触点状态字节的高 4 位为 Touch event。 */
         point->event = event_data[6U + offset] >> 4;
@@ -358,16 +421,16 @@ esp_err_t tp_init(void)
     }
 
     /*
-     * 保存 CHSC5432 报告的原始坐标范围，不交换 X/Y，也不做镜像：
-     *
-     *  - TP_X=240：对应屏幕竖直方向，原点在左下角，X 从下向上递增；
-     *  - TP_Y=320：对应屏幕水平方向，Y 从左向右递增。
+     * 保存 CHSC5432 报告的原始分辨率，事件解析时先用它检查 raw_x/raw_y，
+     * 再转换成 LCD/LVGL 使用的 X=320、Y=240 标准横屏坐标。
      */
     tp_x_resolution = controller_info.tp_x_resolution;
     tp_y_resolution = controller_info.tp_y_resolution;
 
+    /* tp_mutex 串行化 I2C 事务；消息队列把解析结果传递给 LVGL 任务。 */
     tp_mutex = xSemaphoreCreateMutex();
-    if (tp_mutex == NULL) {
+    tp_state_queue = xQueueCreate(TP_STATE_QUEUE_LENGTH, sizeof(tp_state_t));
+    if (tp_mutex == NULL || tp_state_queue == NULL) {
         release_init_resources();
         return ESP_ERR_NO_MEM;
     }
@@ -382,37 +445,77 @@ esp_err_t tp_init(void)
     return ESP_OK;
 }
 
-esp_err_t tp_read(tp_state_t *state)
+esp_err_t tp_read_event_frame(uint8_t *event_data, size_t event_data_size)
 {
-    if (state == NULL) {
+    /* 调用者提供的缓冲区必须能够保存完整的 28 字节事件帧。 */
+    if (event_data == NULL || event_data_size < TP_EVENT_DATA_SIZE) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!tp_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    uint8_t event_data[TP_EVENT_DATA_SIZE] = {0};
-
+    /* 本函数只读取原始事件帧；触点解析由调用者在读取成功后单独执行。 */
     xSemaphoreTake(tp_mutex, portMAX_DELAY);
     esp_err_t result = read_direct_address_unlocked(TP_EVENT_ADDRESS_0x2000002C,
                                                      event_data,
-                                                     sizeof(event_data));
+                                                     TP_EVENT_DATA_SIZE);
     xSemaphoreGive(tp_mutex);
+    return result;
+}
 
-    if (result != ESP_OK) {
-        return result;
+esp_err_t tp_receive_state(tp_state_t *state, uint32_t timeout_ms)
+{
+    if (state == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!tp_initialized || tp_state_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    return parse_touch_event(event_data, state);
+    TickType_t wait_ticks;
+    if (timeout_ms == TP_WAIT_FOREVER) {
+        /* portMAX_DELAY 使接收任务休眠，直到队列中真正出现一帧触摸状态。 */
+        wait_ticks = portMAX_DELAY;
+    } else {
+        wait_ticks = pdMS_TO_TICKS(timeout_ms);
+        if (timeout_ms != 0 && wait_ticks == 0) {
+            /* 非零的短等待时间至少换算成 1 个 RTOS Tick。 */
+            wait_ticks = 1;
+        }
+    }
+
+    return xQueueReceive(tp_state_queue, state, wait_ticks) == pdTRUE
+               ? ESP_OK
+               : ESP_ERR_TIMEOUT;
 }
 
 esp_err_t tp_interrupt_process(void)
 {
-    tp_state_t state;
-    esp_err_t result = tp_read(&state);
+    uint8_t event_data[TP_EVENT_DATA_SIZE] = {0};
+    tp_state_t state = {0};
+
+    /* 第一步只通过 I2C 读取 CHSC5432 的 28 字节原始事件帧。 */
+    esp_err_t result = tp_read_event_frame(event_data, sizeof(event_data));
     if (result != ESP_OK) {
+        /*
+         * 通信失败时发布“无触点”状态，防止 LVGL 一直保留上一次按下状态。
+         * 中断管理任务会在共享中断线仍为低电平时继续重试，不会触发重启。
+         */
+        send_touch_state(&state);
         return result;
     }
+
+    /* 第二步解析刚读取的事件帧，得到触点数量、事件码和 LCD/LVGL 坐标。 */
+    result = parse_touch_event(event_data, sizeof(event_data), &state);
+    if (result != ESP_OK) {
+        /* 帧内容无效时同样发布“无触点”状态，但不会触发系统重启。 */
+        send_touch_state(&state);
+        return result;
+    }
+
+    /* I2C 读取和事件解析都成功后，把完整状态发送到队列供 LVGL 任务接收。 */
+    send_touch_state(&state);
 
     /*
      * 当前没有触点、但上一次存在触点，说明手指刚刚离开屏幕。
@@ -423,7 +526,7 @@ esp_err_t tp_interrupt_process(void)
             ESP_LOGI(TAG, "Touch released");
         }
     } else {
-        /* 当前仍有触摸时，依次输出本次事件中的所有有效原始坐标。 */
+        /* 当前仍有触摸时，依次输出转换后的 LCD/LVGL 坐标。 */
         for (uint8_t index = 0; index < state.point_count; ++index) {
             ESP_LOGI(TAG, "Point %u/%u: x=%u, y=%u, event=0x%02X",
                      (unsigned)(index + 1U),

@@ -4,9 +4,9 @@
 `ATK-DNESP32S3B3 V1`（BOX3）开发板。
 
 程序启动后会检测 Flash 和 PSRAM 容量，执行一次 1 MiB PSRAM 写入/读回测试，
-初始化 AW9523B 扩展 GPIO、板载 2.4 英寸 LCD、microSD 卡和外接 CHSC5432 电容触摸屏，
-在屏幕上显示测试色条，启用 K0/K1/K2 与触摸中断，然后每隔五秒通过 USB
-串口输出一条运行日志。
+初始化 AW9523B 扩展 GPIO、板载 2.4 英寸 LCD、microSD 卡和外接 CHSC5432
+电容触摸屏，并启动 LVGL 9 图形界面。界面显示一个按钮，点击后显示
+`Hello World`。
 
 ## 硬件配置
 
@@ -43,13 +43,13 @@
 - 检测实际 PSRAM 容量，期望值为 8 MiB。
 - 从 PSRAM 分配 1 MiB 缓冲区并完成写入、读回校验。
 - 初始化 AW9523B 独立驱动，并验证 ID 寄存器值为 `0x23`。
-- 初始化 ST7789V2 LCD，以左下角为原点、Y 为物理横轴显示八色测试图。
+- 初始化 ST7789V2 LCD，使用左上角原点、X 水平、Y 竖直的 320×240 标准坐标。
 - 通过与 LCD 共用的 SPI2 挂载 microSD FATFS；未插卡或挂载失败不会触发重启。
-- 初始化 CHSC5432，读取芯片 ID，并通过 GPIO42 中断输出最多 5 个触点坐标。
-- 通过 GPIO42 共享中断管理器查询 AW9523B；K1/K2 分别切换红灯/蓝灯。
-- GPIO42 使用标志位选择处理模块；AW9523B 对应 `0x0001`，触摸对应 `0x0002`。
+- 初始化 CHSC5432，并将原始 240×320 坐标转换为 LVGL 的 320×240 坐标。
+- 使用项目内置 LVGL 9.6.0 显示按钮；点击按钮后显示 `Hello World`。
+- 通过 GPIO42 共享中断管理器处理 AW9523B 和 CHSC5432；K1/K2 分别切换红灯/蓝灯。
+- CHSC5432 只在触摸中断后读取；LVGL 使用缓存状态，不周期轮询 I2C。
 - 使用 GPIO0 下降沿中断检测 K0，任务中进行 20 ms 消抖；每次按下打印一次日志。
-- 每隔五秒输出运行时间，便于确认程序持续运行。
 
 ### AW9523B 驱动
 
@@ -98,10 +98,10 @@ BOX3 硬件设计把 K1、K2 配置为输入，其余 14 路配置为输出。�
 
 AW9523B 的 INTN 与外接触摸屏的 INT 都是低电平有效信号，共用 ESP32-S3
 GPIO42。`interrupt_manager.c/.h` 独占该 GPIO 的 ISR；ISR 只通知 FreeRTOS
-任务，不访问 I2C。管理任务启用 `0x0001 | 0x0002`，同一次中断依次调用
-`aw9523b_interrupt_process()` 和 `tp_interrupt_process()`，读取两颗芯片后分别
-处理。若任一设备仍将共享线拉低，管理任务会延时重试，防止因没有新的下降沿
-而丢失中断。
+任务，不访问 I2C。管理任务同时启用触摸来源 `0x0001` 和 AW9523B 来源
+`0x0002`，合并标志为 `0x0003`。每次 GPIO42 触发后，任务依次调用
+`tp_interrupt_process()` 和 `aw9523b_interrupt_process()` 查询两个设备；若共享线
+仍被任一设备拉低，任务会延时重试，避免一次 I2C 通信失败后再也收不到下降沿。
 
 本示例固定使能 P0 上 K1 和 K2 的 AW9523B 中断，P0 其余引脚及整个 P1 保持屏蔽。
 中断处理读取 P0 输入寄存器 `0x00` 释放 INTN，并按 20 ms 时间窗过滤按键抖动。
@@ -111,8 +111,8 @@ GPIO42。`interrupt_manager.c/.h` 独占该 GPIO 的 ISR；ISR 只通知 FreeRTO
 `spi.c/.h` 负责 SPI2 总线初始化、板级引脚和 DMA 内存管理；`lcd.c/.h` 使用
 ESP-IDF 的 `esp_lcd` ST7789 驱动并提供基础绘图接口；`display.c/.h` 负责 ASCII
 字模、字符串排版和测试色条。屏幕以 60 MHz、SPI 模式 0 工作，逻辑分辨率
-使用 X=240、Y=320 原生地址，物理原点位于左下角，横轴为 Y。LCD 的 RESX 通过
-`ESP_LCD_RESET` 网络与 ESP32-S3 的
+为 320×240：原点位于左上角，X 轴沿水平方向向右递增，Y 轴沿竖直方向向下
+递增，与 LVGL 默认坐标完全一致。LCD 的 RESX 通过 `ESP_LCD_RESET` 网络与 ESP32-S3 的
 `CHIP_PU` 共用，不能作为独立 GPIO 控制，因此面板驱动使用 ST7789 软件复位；背光
 通过 AW9523B P1_0 控制，并按低电平有效逻辑封装为 `lcd_backlight_set()`。
 
@@ -125,6 +125,7 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动并提供基础绘图接口；`display.c/.h` 
 - `lcd_backlight_set()`：打开或关闭背光。
 - `lcd_clear()`：使用一个 RGB565 颜色清除整个屏幕。
 - `lcd_fill_rect()`：填充指定矩形区域。
+- `lcd_draw_pixels()`：按从左到右、从上到下的行优先顺序绘制 RGB565 像素。
 - `lcd_show_char()`：显示一个可打印 ASCII 字符。
 - `lcd_show_string()`：在指定矩形区域内显示 ASCII 字符串。
 - `lcd_show_test_pattern()`：显示八色竖向测试条。
@@ -158,11 +159,31 @@ SPI2 由应用程序统一持有和管理。
 `tp_init()` 将复位信号拉低再拉高，读取 Boot 版本，以及配置区中的 IC 型号、
 配置版本、Project ID、Vendor ID、TP 原始 X/Y 分辨率和最大触点数。全部字段
 读取并输出日志后，再确认芯片为 CHSC5432、原始分辨率为 240×320 且支持
-5 个触点，从而与 LCD 的 X=240、Y=320 原生坐标范围对应。`tp_read()` 从事件地址
+5 个触点。`tp_read()` 从事件地址
 `0x2000002C` 一次读取官方建议的 28 字节，解析最多 5 个触点，并根据 TP 实际
-分辨率完成越界检查；输出坐标不再旋转或镜像。`tp_interrupt_process()` 由 GPIO42 共享中断任务
-调用，读取事件后通过日志输出触点坐标；应用也可以直接调用 `tp_read()` 获取
-`tp_state_t`。
+分辨率完成越界检查，然后按下面的关系转换为 LCD/LVGL 标准坐标：
+
+```text
+LVGL_X = raw_y
+LVGL_Y = 239 - raw_x
+```
+
+转换后原点位于左上角，X 范围为 0~319，Y 范围为 0~239。GPIO42 触发后，
+共享中断任务调用 `tp_interrupt_process()`，通过 I2C 读取事件并更新内存缓存。
+LVGL 输入设备使用事件模式；缓存更新通知到达后立即读取第一个有效触点，
+空闲期间不会周期调用 `tp_read()`，也不会产生 CHSC5432 I2C 轮询。
+
+### LVGL 图形界面
+
+LVGL 9.6.0 源码已作为项目内置组件放在 `components/lvgl/`，不依赖构建时联网
+下载。`lvgl_port.c/.h` 注册 320×240 RGB565 局部刷新缓冲区、中断驱动的
+CHSC5432 指针输入和 LVGL 处理任务；`lvgl_ui.c/.h` 创建示例界面。按钮接收到
+`LV_EVENT_CLICKED` 后，结果标签更新为 `Hello World`。
+
+LVGL 使用 20 行、12800 字节的局部绘制缓冲区。刷新回调直接调用
+`lcd_draw_pixels()`，因为两者都采用行优先像素顺序，不需要运行时转置或旋转。
+应用任务如需在 LVGL 任务之外修改界面，必须先调用 `lvgl_port_lock()`，完成后
+调用 `lvgl_port_unlock()`。
 
 ### LittleFS 组件
 
@@ -179,7 +200,8 @@ xc_esp32s3/
 |-- CMakeLists.txt
 |-- sdkconfig.defaults
 |-- components/
-|   `-- littlefs/             # 项目内置的 LittleFS 组件源码
+|   |-- littlefs/             # 项目内置的 LittleFS 组件源码
+|   `-- lvgl/                 # 项目内置的 LVGL 9.6.0 组件源码
 |-- main/
 |   |-- CMakeLists.txt
 |   |-- main.c
@@ -191,6 +213,8 @@ xc_esp32s3/
 |   |   |-- interrupt_manager.h
 |   |   |-- key_interrupt.h
 |   |   |-- lcd.h
+|   |   |-- lvgl_port.h
+|   |   |-- lvgl_ui.h
 |   |   |-- sd_fatfs.h
 |   |   |-- spi.h
 |   |   `-- tp.h
@@ -202,6 +226,8 @@ xc_esp32s3/
 |       |-- interrupt_manager.c
 |       |-- key_interrupt.c
 |       |-- lcd.c
+|       |-- lvgl_port.c
+|       |-- lvgl_ui.c
 |       |-- sd_fatfs.c
 |       |-- spi.c
 |       `-- tp.c
@@ -219,6 +245,7 @@ xc_esp32s3/
 - 16 MiB QIO Flash、80 MHz。
 - 8 MiB Octal PSRAM、80 MHz。
 - USB Serial/JTAG 主控制台。
+- LVGL RGB565、Montserrat 14、按钮和标签；不编译官方示例与演示源码。
 
 ## `sdkconfig` 与 `sdkconfig.defaults`
 
@@ -343,13 +370,13 @@ I (...) KEY: K0 interrupt ready on GPIO0
 I (...) I2C: I2C0 ready: SCL=GPIO2, SDA=GPIO3
 I (...) AW9523B: Ready: address=0x59, ID=0x23
 I (...) AW9523B: INTN ready, P0 mask=0x03, P1 mask=0x00
-I (...) INT_MGR: Shared interrupt ready on GPIO42, flags=0x0001
+I (...) INT_MGR: Shared interrupt ready on GPIO42, flags=0x0003
 I (...) SPI: SPI2 ready: SCLK=15, MOSI=16, MISO=17, max transfer=16384 bytes
-I (...) LCD: ST7789V2 ready: X=240, Y=320, SPI2 60 MHz, CS=47, DC=48
+I (...) LCD: ST7789V2 ready: X=320, Y=240, SPI2 60 MHz, CS=47, DC=48
+I (...) LVGL: LVGL 9 ready: 320x240, RGB565, draw buffer=20 lines, touch=interrupt
 I (...) KEY: K0 pressed
 I (...) BOX3: K1 pressed, red LED on
 I (...) BOX3: K2 pressed, blue LED on
-I (...) BOX3: Hello World - uptime: 5 s
 ```
 
 检测结果不是 16 MiB Flash 或 8 MiB PSRAM 时，程序会输出警告日志。

@@ -13,6 +13,8 @@ idf_component_register(
         "src/fatfs.c"
         "src/littlefs.c"
         "src/tp.c"
-    PRIV_REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_sdspi esp_driver_spi esp_lcd esp_psram esp_system fatfs heap littlefs nvs_flash sdmmc spi_flash wear_levelling
+        "src/lvgl_port.c"
+        "src/lvgl_ui.c"
+    PRIV_REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_sdspi esp_driver_spi esp_lcd esp_psram esp_system esp_timer fatfs heap littlefs lvgl nvs_flash sdmmc spi_flash wear_levelling
     INCLUDE_DIRS "inc"
 )

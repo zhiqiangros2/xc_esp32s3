@@ -19,13 +19,13 @@
 #define LCD_TRANSFER_LINES 20U
 
 /*
- * DMA 缓冲区能够保存完整的 240 像素 X 轴，以及连续 20 个 Y 坐标位置：
+ * DMA 缓冲区能够保存完整的 320 像素宽度，以及连续 20 行像素：
  *
- *     240 * 20 = 4800 个 RGB565 像素
- *     4800 * sizeof(uint16_t) = 9600 字节
+ *     320 * 20 = 6400 个 RGB565 像素
+ *     6400 * sizeof(uint16_t) = 12800 字节
  *
- * 全屏或大矩形传输时，驱动会沿 Y 轴分批发送，每批最多使用这块缓冲区
- * 容纳的数据量，因此不需要为整个 240x320 屏幕分配完整帧缓冲区。
+ * 全屏或大矩形传输时，驱动会按行分批发送，因此不需要为整个 320x240
+ * 屏幕分配完整帧缓冲区。
  */
 #define LCD_TRANSFER_BUFFER_PIXELS (LCD_X_RESOLUTION * LCD_TRANSFER_LINES)
 
@@ -73,27 +73,27 @@ static bool lcd_color_transfer_done(esp_lcd_panel_io_handle_t panel_io,
 
 static bool lcd_region_is_valid(uint16_t x,
                                 uint16_t y,
-                                uint16_t height,
-                                uint16_t width)
+                                uint16_t width,
+                                uint16_t height)
 {
     /* 高或宽为 0 时没有可绘制的像素，不是有效区域。 */
-    if (height == 0 || width == 0) {
+    if (width == 0 || height == 0) {
         return false;
     }
 
-    /* 起点必须位于 X=0~239、Y=0~319 的 LCD 地址范围内。 */
+    /* 左上角必须位于 X=0~319、Y=0~239 的 LCD 地址范围内。 */
     if (x >= LCD_X_RESOLUTION || y >= LCD_Y_RESOLUTION) {
         return false;
     }
 
     /*
-     * height 沿 X 轴延伸，width 沿 Y 轴延伸。两个尺寸都不能超过对应
-     * 坐标轴的剩余空间。例如 x=220 时，X 轴只剩 20 个像素，因此
-     * height 最大只能是 20。
+     * width 沿 X 轴向右延伸，height 沿 Y 轴向下延伸。两个尺寸都不能
+     * 超过对应坐标轴的剩余空间。例如 x=300 时，屏幕右侧只剩 20 个
+     * 像素，因此 width 最大只能是 20。
      */
-    const uint16_t available_height = LCD_X_RESOLUTION - x;
-    const uint16_t available_width = LCD_Y_RESOLUTION - y;
-    if (height > available_height || width > available_width) {
+    const uint16_t available_width = LCD_X_RESOLUTION - x;
+    const uint16_t available_height = LCD_Y_RESOLUTION - y;
+    if (width > available_width || height > available_height) {
         return false;
     }
 
@@ -102,8 +102,8 @@ static bool lcd_region_is_valid(uint16_t x,
 
 static esp_err_t lcd_fill_rect_locked(uint16_t x,
                                       uint16_t y,
-                                      uint16_t height,
                                       uint16_t width,
+                                      uint16_t height,
                                       uint16_t color)
 {
     /*
@@ -123,22 +123,21 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
     }
 
     /*
-     * DMA 缓冲区容量以“像素数”表示。每个 Y 坐标位置包含 height 个沿
-     * X 轴排列的像素，因此用容量除以 height，可以得到一次传输最多覆盖
-     * 多少个 Y 坐标。例如缓冲区有 4800 个像素、height=240 时，一次最多
-     * 传输 20 个 Y 坐标位置。
+     * 每行包含 width 个像素，因此用 DMA 缓冲区容量除以 width，可以
+     * 得到单次传输最多容纳的行数。例如矩形宽度为 320 时，一次最多发送
+     * 20 行。
      */
-    const uint16_t maximum_y_pixels_per_transfer =
-        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / height);
+    const uint16_t maximum_rows_per_transfer =
+        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / width);
 
     uint16_t transfer_start_y = y;
-    uint16_t remaining_y_pixels = width;
+    uint16_t remaining_rows = height;
 
-    /* Y 方向长度超过单次传输容量时，沿 Y 轴拆成多批发送。 */
-    while (remaining_y_pixels > 0) {
-        uint16_t current_y_pixel_count = remaining_y_pixels;
-        if (current_y_pixel_count > maximum_y_pixels_per_transfer) {
-            current_y_pixel_count = maximum_y_pixels_per_transfer;
+    /* 矩形高度超过单次传输容量时，沿 Y 轴拆成多批发送。 */
+    while (remaining_rows > 0) {
+        uint16_t current_row_count = remaining_rows;
+        if (current_row_count > maximum_rows_per_transfer) {
+            current_row_count = maximum_rows_per_transfer;
         }
 
         /*
@@ -157,8 +156,8 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
             lcd_panel_handle,
             x,
             transfer_start_y,
-            x + height,
-            transfer_start_y + current_y_pixel_count,
+            x + width,
+            transfer_start_y + current_row_count,
             lcd_transfer_buffer);
         if (result != ESP_OK) {
             return result;
@@ -167,9 +166,9 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
         /* DMA 完成后才能复用 lcd_transfer_buffer 发送下一批数据。 */
         xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
 
-        /* 下一批紧接当前 Y 区间，直到矩形在 Y 方向的像素全部发送完成。 */
-        transfer_start_y += current_y_pixel_count;
-        remaining_y_pixels -= current_y_pixel_count;
+        /* 下一批紧接当前行，直到矩形全部发送完成。 */
+        transfer_start_y += current_row_count;
+        remaining_rows -= current_row_count;
     }
 
     return ESP_OK;
@@ -203,7 +202,8 @@ static void lcd_release_resources(void)
  * @brief 初始化板载 ST7789V2 LCD。
  *
  * 调用前必须先初始化 I2C、AW9523B 和 SPI2。函数会依次关闭背光、
- * 创建 LCD 面板、配置 X=240/Y=320 原生坐标、清屏并重新打开背光；重复调用安全。
+ * 创建 LCD 面板、配置 X=320/Y=240 标准横屏坐标、清屏并重新打开背光；
+ * 重复调用安全。
  */
 esp_err_t lcd_init(void)
 {
@@ -313,29 +313,23 @@ esp_err_t lcd_init(void)
     }
 
     /*
-     * 保持 ST7789 原生行列地址，不设置 MADCTL.MV（行列交换）位：
-     *
-     *  - X 范围为 0~239，对应屏幕上的竖直方向；
-     *  - Y 范围为 0~319，对应屏幕上的水平方向。
-     *
-     * BOX3 的 LCD 在结构上横向安装，因此使用控制器原生地址时，物理屏幕的
-     * 横轴是 Y 轴，而不是 X 轴。这也与 CHSC5432 输出的原始 240x320
-     * 触摸坐标范围一致。
+     * ST7789 原生地址是 X=240、Y=320。设置 MADCTL.MV 后交换行列地址，
+     * 使绘图接口改用标准横屏范围：X=0~319、Y=0~239。
      */
     if (result == ESP_OK) {
-        result = esp_lcd_panel_swap_xy(lcd_panel_handle, false);
+        result = esp_lcd_panel_swap_xy(lcd_panel_handle, true);
     }
 
     /*
-     * X、Y 均保持控制器原生递增方向，不设置 MADCTL.MX 和 MADCTL.MY。
-     * 结合上面的 swap_xy=false，物理原点位于屏幕左下角：X 从下向上递增，
-     * 范围为 0~239；Y 从左向右递增，范围为 0~319。
+     * BOX3 横屏安装方向需要反转交换后的 X 地址方向。结合上面的行列交换，
+     * 最终坐标与 LVGL 一致：原点位于左上角，X 从左向右递增，Y 从上向下
+     * 递增。
      *
-     * 这里只改变 LCD 显存地址与物理方向的对应关系，不修改 RGB565 像素数据，
-     * 也不转换触摸坐标。
+     * 这里只改变 LCD 显存地址映射，不修改传入的 RGB565 像素数据。触摸
+     * 驱动会单独把 CHSC5432 原始坐标转换到同一坐标系。
      */
     if (result == ESP_OK) {
-        result = esp_lcd_panel_mirror(lcd_panel_handle, false, false);
+        result = esp_lcd_panel_mirror(lcd_panel_handle, true, false);
     }
 
     /* 显示开启前先清成黑色，避免背光点亮时出现旧显存内容。 */
@@ -392,55 +386,108 @@ esp_err_t lcd_clear(uint16_t color)
 
 esp_err_t lcd_fill_rect(uint16_t x,
                         uint16_t y,
-                        uint16_t height,
                         uint16_t width,
+                        uint16_t height,
                         uint16_t color)
 {
     if (!lcd_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!lcd_region_is_valid(x, y, height, width)) {
+    if (!lcd_region_is_valid(x, y, width, height)) {
         return ESP_ERR_INVALID_ARG;
     }
 
     xSemaphoreTake(lcd_mutex, portMAX_DELAY);
-    esp_err_t result = lcd_fill_rect_locked(x, y, height, width, color);
+    esp_err_t result = lcd_fill_rect_locked(x, y, width, height, color);
     xSemaphoreGive(lcd_mutex);
     return result;
 }
 
+/**
+ * @brief 把连续的 RGB565 像素数组绘制到 LCD 的指定矩形区域。
+ *
+ * @details pixels 采用常见的逐行排列：先保存最上面一行，并在一行内从
+ * 左向右保存，然后继续保存下一行。因此源数组下标和目标坐标的关系是：
+ *
+ *     source_index = row * width + column
+ *     LCD_X        = x + column
+ *     LCD_Y        = y + row
+ *
+ * 例如 width=4、height=3 时，数组与屏幕位置的关系如下：
+ *
+ *                      LCD X 向右
+ *       (x, y) +----------+----------+----------+----------+
+ *              | pixels[0]| pixels[1]| pixels[2]| pixels[3]|
+ *              +----------+----------+----------+----------+
+ *              | pixels[4]| pixels[5]| pixels[6]| pixels[7]|
+ *              +----------+----------+----------+----------+
+ *              | pixels[8]| pixels[9]|pixels[10]|pixels[11]|
+ *              +----------+----------+----------+----------+
+ *              |
+ *              v LCD Y 向下
+ *
+ * 内部 DMA 缓冲区只能容纳 LCD_TRANSFER_BUFFER_PIXELS 个像素，所以较大
+ * 矩形会按完整行分成多批。每批执行以下步骤：
+ *
+ *  1. 计算本批最多可以传输多少行；
+ *  2. 把对应源像素复制到 DMA 缓冲区，同时把 RGB565 的两个字节转换为
+ *     ST7789 在线路上需要的高字节先发顺序；
+ *  3. 启动当前矩形分块的 SPI DMA 传输；
+ *  4. 等待 DMA 完成，再复用同一个传输缓冲区处理下一批。
+ *
+ * lcd_mutex 会保证多个任务不会同时使用 LCD 和共享 DMA 缓冲区。函数等待
+ * 最后一批 DMA 完成后才释放互斥锁并返回，因此返回后 pixels 可以立即复用。
+ *
+ * @param[in] x 目标矩形左上角的 LCD X 坐标。
+ * @param[in] y 目标矩形左上角的 LCD Y 坐标。
+ * @param[in] width 目标矩形宽度，沿 X 轴向右延伸。
+ * @param[in] height 目标矩形高度，沿 Y 轴向下延伸。
+ * @param[in] pixels 至少包含 width * height 个元素的 RGB565 源像素数组。
+ * @return ESP_OK 全部像素绘制成功；LCD 未初始化时返回
+ * ESP_ERR_INVALID_STATE；参数无效时返回 ESP_ERR_INVALID_ARG；底层 LCD
+ * 传输失败时返回 esp_lcd_panel_draw_bitmap() 的错误码。
+ */
 esp_err_t lcd_draw_pixels(uint16_t x,
                           uint16_t y,
-                          uint16_t height,
                           uint16_t width,
+                          uint16_t height,
                           const uint16_t *pixels)
 {
     if (!lcd_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (pixels == NULL || !lcd_region_is_valid(x, y, height, width)) {
+    if (pixels == NULL || !lcd_region_is_valid(x, y, width, height)) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* 每个 Y 坐标包含 height 个连续的 X 方向像素。 */
-    const uint16_t maximum_y_pixels_per_transfer =
-        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / height);
+    /* DMA 缓冲区容量除以每行像素数，得到一次最多能够发送的完整行数。 */
+    const uint16_t maximum_rows_per_transfer =
+        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / width);
+
+    /* 第一批从 y 开始；后续每完成一批，就继续发送其下方尚未发送的行。 */
     uint16_t transfer_start_y = y;
-    uint16_t remaining_y_pixels = width;
+    uint16_t remaining_rows = height;
+
+    /* 指向 pixels 中下一批源数据的第一个像素。 */
     size_t source_pixel_index = 0;
     esp_err_t result = ESP_OK;
 
+    /* 独占 LCD 面板和共享 DMA 缓冲区，避免其他任务同时绘图。 */
     xSemaphoreTake(lcd_mutex, portMAX_DELAY);
 
-    while (remaining_y_pixels > 0) {
-        uint16_t current_y_pixel_count = remaining_y_pixels;
-        if (current_y_pixel_count > maximum_y_pixels_per_transfer) {
-            current_y_pixel_count = maximum_y_pixels_per_transfer;
+    while (remaining_rows > 0) {
+        /* 最后一批可能不足最大行数，只发送实际剩余的完整行。 */
+        uint16_t current_row_count = remaining_rows;
+        if (current_row_count > maximum_rows_per_transfer) {
+            current_row_count = maximum_rows_per_transfer;
         }
 
-        /* 当前批次的像素总数 = X 方向像素数乘以本批次的 Y 方向像素数。 */
+        /*
+         * 当前批次的像素总数 = 每行像素数 * 本批次行数。复制时顺便交换
+         * RGB565 的高低字节，让 DMA 缓冲区中的数据可以直接发给 ST7789。
+         */
         const size_t current_transfer_pixel_count =
-            (size_t)height * current_y_pixel_count;
+            (size_t)width * current_row_count;
         for (size_t pixel_index = 0;
              pixel_index < current_transfer_pixel_count;
              ++pixel_index) {
@@ -459,8 +506,8 @@ esp_err_t lcd_draw_pixels(uint16_t x,
             lcd_panel_handle,
             x,
             transfer_start_y,
-            x + height,
-            transfer_start_y + current_y_pixel_count,
+            x + width,
+            transfer_start_y + current_row_count,
             lcd_transfer_buffer);
         if (result != ESP_OK) {
             break;
@@ -469,8 +516,9 @@ esp_err_t lcd_draw_pixels(uint16_t x,
         /* DMA 完成后才能改写共享传输缓冲区。 */
         xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
 
-        transfer_start_y += current_y_pixel_count;
-        remaining_y_pixels -= current_y_pixel_count;
+        /* 移到下一批的屏幕起始行和源数组起始像素。 */
+        transfer_start_y += current_row_count;
+        remaining_rows -= current_row_count;
         source_pixel_index += current_transfer_pixel_count;
     }
 
