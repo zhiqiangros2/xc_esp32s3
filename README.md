@@ -205,32 +205,41 @@ xc_esp32s3/
 |-- main/
 |   |-- CMakeLists.txt
 |   |-- main.c
-|   |-- inc/
-|   |   |-- aw9523b.h
-|   |   |-- display.h
-|   |   |-- fatfs.h
-|   |   |-- i2c.h
-|   |   |-- interrupt_manager.h
-|   |   |-- key_interrupt.h
-|   |   |-- lcd.h
-|   |   |-- lvgl_port.h
-|   |   |-- lvgl_ui.h
-|   |   |-- sd_fatfs.h
-|   |   |-- spi.h
-|   |   `-- tp.h
-|   `-- src/
-|       |-- aw9523b.c
-|       |-- display.c
-|       |-- fatfs.c
-|       |-- i2c.c
-|       |-- interrupt_manager.c
-|       |-- key_interrupt.c
-|       |-- lcd.c
-|       |-- lvgl_port.c
-|       |-- lvgl_ui.c
-|       |-- sd_fatfs.c
-|       |-- spi.c
-|       `-- tp.c
+|   |-- app/
+|   |   |-- inc/
+|   |   |   |-- lvgl_port.h
+|   |   |   `-- lvgl_ui.h
+|   |   `-- src/
+|   |       |-- lvgl_port.c
+|   |       `-- lvgl_ui.c
+|   `-- bsp/
+|       |-- inc/
+|       |   |-- aw9523b.h
+|       |   |-- bsp_info.h
+|       |   |-- display.h
+|       |   |-- fatfs.h
+|       |   |-- i2c.h
+|       |   |-- interrupt_manager.h
+|       |   |-- key_interrupt.h
+|       |   |-- lcd.h
+|       |   |-- lcdfont.h
+|       |   |-- littlefs.h
+|       |   |-- sd_fatfs.h
+|       |   |-- spi.h
+|       |   `-- tp.h
+|       `-- src/
+|           |-- aw9523b.c
+|           |-- bsp_info.c
+|           |-- display.c
+|           |-- fatfs.c
+|           |-- i2c.c
+|           |-- interrupt_manager.c
+|           |-- key_interrupt.c
+|           |-- lcd.c
+|           |-- littlefs.c
+|           |-- sd_fatfs.c
+|           |-- spi.c
+|           `-- tp.c
 |-- README.md
 `-- pdf/
     |-- ATK_DNESP32S3B3_V1.0.pdf
