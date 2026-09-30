@@ -33,6 +33,15 @@ static const char *TAG = "LCD";
 static esp_lcd_panel_io_handle_t lcd_io_handle = NULL;
 static esp_lcd_panel_handle_t lcd_panel_handle = NULL;
 static SemaphoreHandle_t lcd_mutex = NULL;
+/*
+ * LCD DMA 传输完成二值信号量：
+ *
+ * - 空状态：当前没有可处理的 DMA 完成通知；
+ * - 可取状态：DMA 完成回调已经发出一次完成通知。
+ *
+ * 它只表示“完成”或“未完成”，不累计完成次数。发送任务启动 DMA 后等待
+ * 该信号量，回调在 DMA 结束时释放信号量，防止任务过早改写传输缓冲区。
+ */
 static SemaphoreHandle_t lcd_dma_done_semaphore = NULL;
 static uint16_t *lcd_transfer_buffer = NULL;
 static bool lcd_initialized = false;
@@ -57,6 +66,7 @@ static bool lcd_color_transfer_done(esp_lcd_panel_io_handle_t panel_io,
     (void)event_data;
 
     BaseType_t task_woken = pdFALSE;
+    /* DMA 已完成，将二值信号量置为可取状态，唤醒正在等待的发送任务。 */
     xSemaphoreGiveFromISR((SemaphoreHandle_t)user_context, &task_woken);
     return task_woken == pdTRUE;
 }
@@ -121,26 +131,34 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
     const uint16_t maximum_y_pixels_per_transfer =
         (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / height);
 
-    uint16_t current_transfer_y = y;
-    uint16_t y_pixels_left_to_transfer = width;
+    uint16_t transfer_start_y = y;
+    uint16_t remaining_y_pixels = width;
 
     /* Y 方向长度超过单次传输容量时，沿 Y 轴拆成多批发送。 */
-    while (y_pixels_left_to_transfer > 0) {
-        uint16_t y_pixels_this_transfer = y_pixels_left_to_transfer;
-        if (y_pixels_this_transfer > maximum_y_pixels_per_transfer) {
-            y_pixels_this_transfer = maximum_y_pixels_per_transfer;
+    while (remaining_y_pixels > 0) {
+        uint16_t current_y_pixel_count = remaining_y_pixels;
+        if (current_y_pixel_count > maximum_y_pixels_per_transfer) {
+            current_y_pixel_count = maximum_y_pixels_per_transfer;
         }
 
-        /* 清除旧的完成通知，确保下面等待的是当前这批 DMA 传输。 */
+        /*
+         * 以 0 Tick 超时尝试获取二值信号量，不会在这里阻塞：
+         *
+         * - 返回 pdTRUE：存在上一次 DMA 遗留的完成通知，将其清除；
+         * - 返回 pdFALSE：信号量已经为空，立即结束循环。
+         *
+         * 这样，启动下面的新 DMA 后，portMAX_DELAY 等到的一定是本次传输
+         * 完成时由回调发出的通知。
+         */
         while (xSemaphoreTake(lcd_dma_done_semaphore, 0) == pdTRUE) {
         }
 
         esp_err_t result = esp_lcd_panel_draw_bitmap(
             lcd_panel_handle,
             x,
-            current_transfer_y,
+            transfer_start_y,
             x + height,
-            current_transfer_y + y_pixels_this_transfer,
+            transfer_start_y + current_y_pixel_count,
             lcd_transfer_buffer);
         if (result != ESP_OK) {
             return result;
@@ -150,8 +168,8 @@ static esp_err_t lcd_fill_rect_locked(uint16_t x,
         xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
 
         /* 下一批紧接当前 Y 区间，直到矩形在 Y 方向的像素全部发送完成。 */
-        current_transfer_y += y_pixels_this_transfer;
-        y_pixels_left_to_transfer -= y_pixels_this_transfer;
+        transfer_start_y += current_y_pixel_count;
+        remaining_y_pixels -= current_y_pixel_count;
     }
 
     return ESP_OK;
@@ -407,38 +425,42 @@ esp_err_t lcd_draw_pixels(uint16_t x,
     /* 每个 Y 坐标包含 height 个连续的 X 方向像素。 */
     const uint16_t maximum_y_pixels_per_transfer =
         (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / height);
-    uint16_t current_transfer_y = y;
-    uint16_t y_pixels_left_to_transfer = width;
+    uint16_t transfer_start_y = y;
+    uint16_t remaining_y_pixels = width;
     size_t source_pixel_index = 0;
     esp_err_t result = ESP_OK;
 
     xSemaphoreTake(lcd_mutex, portMAX_DELAY);
 
-    while (y_pixels_left_to_transfer > 0) {
-        uint16_t y_pixels_this_transfer = y_pixels_left_to_transfer;
-        if (y_pixels_this_transfer > maximum_y_pixels_per_transfer) {
-            y_pixels_this_transfer = maximum_y_pixels_per_transfer;
+    while (remaining_y_pixels > 0) {
+        uint16_t current_y_pixel_count = remaining_y_pixels;
+        if (current_y_pixel_count > maximum_y_pixels_per_transfer) {
+            current_y_pixel_count = maximum_y_pixels_per_transfer;
         }
 
-        const size_t pixels_this_transfer =
-            (size_t)height * y_pixels_this_transfer;
+        /* 当前批次的像素总数 = X 方向像素数乘以本批次的 Y 方向像素数。 */
+        const size_t current_transfer_pixel_count =
+            (size_t)height * current_y_pixel_count;
         for (size_t pixel_index = 0;
-             pixel_index < pixels_this_transfer;
+             pixel_index < current_transfer_pixel_count;
              ++pixel_index) {
             lcd_transfer_buffer[pixel_index] =
                 rgb565_to_wire_order(pixels[source_pixel_index + pixel_index]);
         }
 
-        /* 清除旧通知，确保下面等待的是当前这次 DMA 传输。 */
+        /*
+         * 以 0 Tick 超时清除二值信号量中可能残留的旧 DMA 完成通知；操作
+         * 不会阻塞。清空后，下面的等待只会被当前这次 DMA 的完成回调唤醒。
+         */
         while (xSemaphoreTake(lcd_dma_done_semaphore, 0) == pdTRUE) {
         }
 
         result = esp_lcd_panel_draw_bitmap(
             lcd_panel_handle,
             x,
-            current_transfer_y,
+            transfer_start_y,
             x + height,
-            current_transfer_y + y_pixels_this_transfer,
+            transfer_start_y + current_y_pixel_count,
             lcd_transfer_buffer);
         if (result != ESP_OK) {
             break;
@@ -447,9 +469,9 @@ esp_err_t lcd_draw_pixels(uint16_t x,
         /* DMA 完成后才能改写共享传输缓冲区。 */
         xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
 
-        current_transfer_y += y_pixels_this_transfer;
-        y_pixels_left_to_transfer -= y_pixels_this_transfer;
-        source_pixel_index += pixels_this_transfer;
+        transfer_start_y += current_y_pixel_count;
+        remaining_y_pixels -= current_y_pixel_count;
+        source_pixel_index += current_transfer_pixel_count;
     }
 
     xSemaphoreGive(lcd_mutex);

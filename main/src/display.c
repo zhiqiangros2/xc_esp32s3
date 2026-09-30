@@ -6,6 +6,8 @@
 #include "lcd.h"
 #include "lcdfont.h"
 
+#define DISPLAY_MAX_GLYPH_WIDTH 16U
+
 typedef struct {
     const unsigned char *bitmap;
     uint8_t width;
@@ -90,6 +92,48 @@ static bool display_get_ascii_glyph(char character,
     }
 }
 
+/**
+ * @brief 把 PC2LCD2002 的原始逐行字模转换为 LCD 可直接使用的逐列位图。
+ *
+ * 原始字模从顶部到底部逐行保存，每行从左到右、高位在前。转换结果中，
+ * lcd_bitmap[y] 保存字符的第 y 个 LCD 列，bit0 对应 X=0，bit1 对应 X=1，
+ * 依此类推。由于当前最大字号高度为 32，所以一个 uint32_t 可以完整保存
+ * 一列。字符顶部在较大的 X，字符底部在较小的 X。
+ *
+ * @param[in] glyph 原始 ASCII 字模及其宽度、高度和每行字节数。
+ * @param[out] lcd_bitmap 转换后的 LCD 列位图，数组至少包含 16 个元素。
+ */
+static void display_prepare_lcd_bitmap(
+    const display_ascii_glyph_t *glyph,
+    uint32_t lcd_bitmap[DISPLAY_MAX_GLYPH_WIDTH])
+{
+    /* 清空全部列，避免较窄字符之外残留未使用的数据。 */
+    for (uint8_t column = 0; column < DISPLAY_MAX_GLYPH_WIDTH; ++column) {
+        lcd_bitmap[column] = 0;
+    }
+
+    for (uint8_t source_row = 0; source_row < glyph->height; ++source_row) {
+        const unsigned char *source_row_bitmap =
+            glyph->bitmap + (size_t)source_row * glyph->bytes_per_row;
+
+        /* 字模顶部映射到较大的 LCD X，底部映射到较小的 LCD X。 */
+        const uint8_t lcd_x = glyph->height - 1U - source_row;
+
+        for (uint8_t source_column = 0;
+             source_column < glyph->width;
+             ++source_column) {
+            const uint8_t source_byte = source_column / 8U;
+            const uint8_t source_bit =
+                (uint8_t)(0x80U >> (source_column % 8U));
+
+            /* 空白像素保持为 0，只把字形像素写入对应 LCD X 位。 */
+            if ((source_row_bitmap[source_byte] & source_bit) != 0) {
+                lcd_bitmap[source_column] |= (uint32_t)1U << lcd_x;
+            }
+        }
+    }
+}
+
 esp_err_t lcd_show_char(uint16_t x,
                         uint16_t y,
                         char character,
@@ -107,42 +151,29 @@ esp_err_t lcd_show_char(uint16_t x,
         return ESP_ERR_INVALID_ARG;
     }
 
-    /*
-     * 字模原始数据按“从上到下逐行、每行从左到右”保存。当前 LCD 的 X 轴
-     * 从下向上，Y 轴从左向右，因此显示一个正向字符时需要重新排列像素：
-     *
-     *  - 字模的行映射到 LCD 的 X 轴，并反转顺序，使字模顶部位于较大的 X；
-     *  - 字模的列映射到 LCD 的 Y 轴，保持从左向右的顺序。
-     */
-    for (uint8_t y_offset = 0; y_offset < glyph.width; ++y_offset) {
-        uint8_t x_offset = 0;
-        while (x_offset < glyph.height) {
-            const uint8_t source_row = glyph.height - 1U - x_offset;
-            const uint8_t source_column = y_offset;
-            const size_t byte_index =
-                (size_t)source_row * glyph.bytes_per_row + source_column / 8U;
-            const uint8_t bit_mask =
-                (uint8_t)(0x80U >> (source_column % 8U));
+    /* 先转换一次字模，下面的绘制循环直接使用 LCD X/Y 方向的数据。 */
+    uint32_t lcd_bitmap[DISPLAY_MAX_GLYPH_WIDTH];
+    display_prepare_lcd_bitmap(&glyph, lcd_bitmap);
 
-            /* 跳过当前行的空白像素，保持屏幕原有背景不变。 */
-            if ((glyph.bitmap[byte_index] & bit_mask) == 0) {
+    for (uint8_t y_offset = 0; y_offset < glyph.width; ++y_offset) {
+        uint32_t remaining_column_pixels = lcd_bitmap[y_offset];
+        uint8_t x_offset = 0;
+
+        while (x_offset < glyph.height) {
+            /* 最低位为当前 X 像素；0 表示空白，不覆盖屏幕原有背景。 */
+            if ((remaining_column_pixels & 1U) == 0) {
                 ++x_offset;
+                remaining_column_pixels >>= 1;
                 continue;
             }
 
             /* 找到一段连续笔画，一次写入，减少 LCD 事务次数。 */
             const uint8_t run_start = x_offset;
-            ++x_offset;
-            while (x_offset < glyph.height) {
-                const uint8_t next_source_row = glyph.height - 1U - x_offset;
-                const size_t next_byte_index =
-                    (size_t)next_source_row * glyph.bytes_per_row +
-                    source_column / 8U;
-                if ((glyph.bitmap[next_byte_index] & bit_mask) == 0) {
-                    break;
-                }
+            do {
                 ++x_offset;
-            }
+                remaining_column_pixels >>= 1;
+            } while (x_offset < glyph.height &&
+                     (remaining_column_pixels & 1U) != 0);
 
             esp_err_t result = lcd_fill_rect((uint16_t)(x + run_start),
                                               (uint16_t)(y + y_offset),

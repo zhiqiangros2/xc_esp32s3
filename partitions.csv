@@ -14,15 +14,17 @@
 #   NVS       0x009000~0x00EFFF，保存 Wi-Fi、蓝牙等非易失参数。
 #   PHY       0x00F000~0x00FFFF，保存 Wi-Fi PHY 校准数据。
 #   factory   0x010000~0x1FFFFF，保存应用固件，大小 0x1F0000（约 1.94 MiB）。
-#   vfs       0x200000~0xBFFFFF，内部 Flash FATFS 分区，大小 0xA00000（10 MiB）。
-#   storage   0xC00000~0xFFFFFF，LittleFS 文件系统，大小 0x400000（4 MiB）。
+#   vfs       0x200000~0x3FFFFF，内部 Flash FATFS 分区，大小 0x200000（2 MiB）。
+#   storage   0x400000~0x5FFFFF，LittleFS 文件系统，大小 0x200000（2 MiB）。
+#   未分配    0x600000~0xFFFFFF，剩余 Flash 空间，大小 0xA00000（10 MiB）。
 #
-# factory、vfs 和 storage 首尾连续，三者之间没有重叠，正好使用完整的 16 MiB
-# Flash 数据区域。vfs 分区只有分区空间，仍需在代码中调用 SPI Flash FATFS
-# 挂载接口后才能通过文件路径访问；当前工程的 LittleFS 仍使用 storage 分区。
+# factory、vfs 和 storage 首尾连续，三者之间没有重叠。vfs 分区只有分区空间，
+# 仍需在代码中调用 SPI Flash FATFS 挂载接口后才能通过文件路径访问；当前工程
+# 的 LittleFS 仍使用 storage 分区。storage 结束后的 10 MiB 暂未分配，可以以后
+# 扩展为文件系统、OTA 分区或其他数据分区。
 # 如果以后修改分区偏移或大小，需要同步检查 sdkconfig 和实际烧录的分区表。
 nvs,        data, nvs,      0x9000,   0x6000,
 phy_init,   data, phy,      0xF000,   0x1000,
 factory,    app,  factory,  0x10000,  0x1F0000,
-vfs,        data, fat,      0x200000, 0xA00000,
-storage,    data, littlefs, 0xC00000, 0x400000,
+vfs,        data, fat,      0x200000, 0x200000,
+storage,    data, littlefs, 0x400000, 0x200000,
