@@ -91,4 +91,38 @@ esp_err_t lcd_draw_pixels(uint16_t x,
                           uint16_t height,
                           const uint16_t *pixels);
 
+/**
+ * @brief 绘制已经按 LCD 传输字节序排列的 RGB565 图像。
+ *
+ * @details 本接口供 GC0308 等直接输出 RGB565 字节流的设备使用。pixels
+ * 必须按从左到右、从上到下的顺序保存，每个像素占两个连续字节，并且先放
+ * RGB565 高 8 位，再放低 8 位：
+ *
+ *     pixels[0] = 第 0 个像素的 RGB565 高字节
+ *     pixels[1] = 第 0 个像素的 RGB565 低字节
+ *     pixels[2] = 第 1 个像素的 RGB565 高字节
+ *     pixels[3] = 第 1 个像素的 RGB565 低字节
+ *
+ * 坐标和矩形方向与 lcd_draw_pixels() 相同：(x, y) 是左上角，width 沿
+ * X 轴向右，height 沿 Y 轴向下。函数把源数据分批复制到片内 DMA 缓冲区，
+ * 等待每批 SPI 传输完成后再处理下一批；返回后调用者可以立即复用 pixels。
+ *
+ * 与 lcd_draw_pixels() 的区别是：lcd_draw_pixels() 接收 ESP32 内存中的
+ * uint16_t RGB565 数值，并会交换每个像素的高低字节；本函数接收已经是
+ * “高字节、低字节”顺序的原始字节流，不再执行字节交换。
+ *
+ * @param[in] x 目标矩形左上角的 X 坐标。
+ * @param[in] y 目标矩形左上角的 Y 坐标。
+ * @param[in] width 目标矩形宽度，不能为 0。
+ * @param[in] height 目标矩形高度，不能为 0。
+ * @param[in] pixels 至少包含 width * height * 2 字节的 RGB565 数据。
+ * @return ESP_OK 绘制成功；LCD 未初始化、参数无效或底层传输失败时返回
+ * 对应错误码。
+ */
+esp_err_t lcd_draw_rgb565_bytes(uint16_t x,
+                                uint16_t y,
+                                uint16_t width,
+                                uint16_t height,
+                                const uint8_t *pixels);
+
 #endif

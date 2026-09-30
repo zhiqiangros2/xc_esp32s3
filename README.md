@@ -5,8 +5,8 @@
 
 程序启动后会检测 Flash 和 PSRAM 容量，执行一次 1 MiB PSRAM 写入/读回测试，
 初始化 AW9523B 扩展 GPIO、板载 2.4 英寸 LCD、microSD 卡和外接 CHSC5432
-电容触摸屏，并启动 LVGL 9 图形界面。界面显示一个按钮，点击后显示
-`Hello World`。
+电容触摸屏，并启动 LVGL 9 图形界面。主界面左上角显示 `Test Button`，点击
+后进入测试页面；测试页面中的 `Back` 按钮可以返回主界面。
 
 ## 硬件配置
 
@@ -46,7 +46,7 @@
 - 初始化 ST7789V2 LCD，使用左上角原点、X 水平、Y 竖直的 320×240 标准坐标。
 - 通过与 LCD 共用的 SPI2 挂载 microSD FATFS；未插卡或挂载失败不会触发重启。
 - 初始化 CHSC5432，并将原始 240×320 坐标转换为 LVGL 的 320×240 坐标。
-- 使用项目内置 LVGL 9.6.0 显示按钮；点击按钮后显示 `Hello World`。
+- 使用项目内置 LVGL 9.6.0 创建主界面和测试页面，并支持按钮双向切换。
 - 通过 GPIO42 共享中断管理器处理 AW9523B 和 CHSC5432；K1/K2 分别切换红灯/蓝灯。
 - CHSC5432 只在触摸中断后读取；LVGL 使用缓存状态，不周期轮询 I2C。
 - 使用 GPIO0 下降沿中断检测 K0，任务中进行 20 ms 消抖；每次按下打印一次日志。
@@ -177,8 +177,9 @@ LVGL 输入设备使用事件模式；缓存更新通知到达后立即读取第
 
 LVGL 9.6.0 源码已作为项目内置组件放在 `components/lvgl/`，不依赖构建时联网
 下载。`lvgl_port.c/.h` 注册 320×240 RGB565 局部刷新缓冲区、中断驱动的
-CHSC5432 指针输入和 LVGL 处理任务；`lvgl_ui.c/.h` 创建示例界面。按钮接收到
-`LV_EVENT_CLICKED` 后，结果标签更新为 `Hello World`。
+CHSC5432 指针输入和 LVGL 处理任务；`lvgl_ui.c/.h` 创建主界面，
+`lvgl_test_page.c/.h` 创建独立测试页面。主界面的 `Test Button` 切换到测试
+页面，测试页面右下角的 `Back` 按钮切换回主界面。
 
 LVGL 使用 20 行、12800 字节的局部绘制缓冲区。刷新回调直接调用
 `lcd_draw_pixels()`，因为两者都采用行优先像素顺序，不需要运行时转置或旋转。
@@ -208,9 +209,11 @@ xc_esp32s3/
 |   |-- app/
 |   |   |-- inc/
 |   |   |   |-- lvgl_port.h
+|   |   |   |-- lvgl_test_page.h
 |   |   |   `-- lvgl_ui.h
 |   |   `-- src/
 |   |       |-- lvgl_port.c
+|   |       |-- lvgl_test_page.c
 |   |       `-- lvgl_ui.c
 |   `-- bsp/
 |       |-- inc/

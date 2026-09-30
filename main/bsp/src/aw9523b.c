@@ -456,6 +456,34 @@ esp_err_t aw9523b_set_box3_led(aw9523b_p1_pin_t led, bool on)
     return aw9523b_write_gpio(AW9523B_PORT_1, led, !on);
 }
 
+esp_err_t aw9523b_enable_box3_power(void)
+{
+    if (!aw9523b_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t result = aw9523b_write_gpio(AW9523B_PORT_1,
+                                           AW9523B_BOX3_VBAT_ENABLE,
+                                           true);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable VBAT: %s", esp_err_to_name(result));
+        return result;
+    }
+
+    result = aw9523b_write_gpio(AW9523B_PORT_1,
+                                AW9523B_BOX3_VDDA_3V3_ENABLE,
+                                true);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Failed to enable VDDA_3V3: %s",
+                 esp_err_to_name(result));
+        return result;
+    }
+
+    ESP_LOGI(TAG, "BOX3 power enabled: VBAT_EN=1, VDDA_3V3_EN=1");
+    return ESP_OK;
+}
+
 esp_err_t aw9523b_interrupt_init(void)
 {
     if (!aw9523b_initialized) {

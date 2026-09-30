@@ -4,6 +4,7 @@
 
 #include "aw9523b.h"
 #include "bsp_info.h"
+#include "camera.h"
 #include "display.h"
 #include "fatfs.h"
 #include "esp_log.h"
@@ -25,7 +26,7 @@ static const char *TAG = "BOX3";
 
 void app_main(void)
 {
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    vTaskDelay(pdMS_TO_TICKS(10000));
 
     /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
     esp_err_t err = nvs_flash_init();
@@ -45,18 +46,38 @@ void app_main(void)
     /* 初始化板级 I2C0 总线，后续 AW9523B 和触摸屏共用该总线。 */
     ESP_ERROR_CHECK(board_i2c_init());
 
-    /* 初始化 AW9523B，并确保板载红、蓝 LED 均处于熄灭状态。 */
+    /* 初始化 AW9523B 后显式打开上游 VBAT 和模拟 3.3 V 电源。 */
     ESP_ERROR_CHECK(aw9523b_init());
+    ESP_ERROR_CHECK(aw9523b_enable_box3_power());
+
+    /* 让 GC0308 保持复位，再使能其 2.8 V 电源。 */
+    ESP_ERROR_CHECK(camera_power_on());
+
+    /* 确保板载红、蓝 LED 均处于熄灭状态。 */
     ESP_ERROR_CHECK(aw9523b_set_box3_led(AW9523B_BOX3_LED_RED, false));
     ESP_ERROR_CHECK(aw9523b_set_box3_led(AW9523B_BOX3_LED_BLUE, false));
 
     /* 配置 AW9523B 的 K1/K2 输入变化中断。 */
     ESP_ERROR_CHECK(aw9523b_interrupt_init());
 
-    /* CHSC5432 通过 I2C 读取触点，复位信号由 AW9523B P1_7 控制。 */
+    /*
+     * GC0308 与 CHSC5432 共用 AW9523B P1_7 复位信号。camera_power_on()
+     * 已经保持 P1_7 为低并给 GC0308 上电；现在由触摸驱动在电源稳定后
+     * 统一释放复位，避免 GC0308 在不完整的上电状态下拉住 I2C/SCCB。
+     */
     ESP_ERROR_CHECK(tp_init());
 
-    /* GPIO42 触发后依次查询 AW9523B 和 CHSC5432，判断实际中断来源。 */
+    esp_err_t camera_result = camera_init();
+    if (camera_result != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "Camera unavailable; continuing without camera: %s",
+                 esp_err_to_name(camera_result));
+    }
+
+    /*
+     * 触摸和摄像头初始化完成后才启动 GPIO42 中断任务，避免初始化期间出现
+     * 触摸 I2C 访问与摄像头 SCCB 配置同时占用 I2C0 的情况。
+     */
     ESP_ERROR_CHECK(interrupt_manager_init(INTERRUPT_SOURCE_AW9523B |
                                            INTERRUPT_SOURCE_TOUCH));
 
@@ -121,7 +142,7 @@ void app_main(void)
                  esp_err_to_name(littlefs_result));
     }
 
-#if 0
+#if 1
     /*
      * LVGL 接入前使用的直接 LCD 绘图示例保留在本代码块中。当前 #if 1
      * 表示启用直接 LCD 测试；由于下面包含无限循环，程序不会继续执行后面的
@@ -135,18 +156,12 @@ void app_main(void)
     ESP_ERROR_CHECK(lcd_show_test_pattern());
     vTaskDelay(pdMS_TO_TICKS(2000));
 
-
-    ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_GREEN));
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
     uint32_t seconds = 0;
     char uptime_text[40];
     while (true) {
-        snprintf(uptime_text,
-                 sizeof(uptime_text),
-                 "Hello World - uptime: %u s",
-                 (unsigned)seconds);
 
+        ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_GREEN));
+        vTaskDelay(pdMS_TO_TICKS(1000));
         /*
          * 每次刷新前清除屏幕顶部一整行。标准坐标中 width 沿 X 轴水平
          * 向右，所以宽度使用 320；height 沿 Y 轴竖直向下，所以高度为 16。
@@ -158,6 +173,10 @@ void app_main(void)
                                                   LCD_COLOR_WHITE);
 
         if (display_result == ESP_OK) {
+
+            snprintf(uptime_text,sizeof(uptime_text),
+                "Hello World - uptime: %u s",
+                (unsigned)seconds);
             /* 在 Y=0 的第一行中，从左向右显示运行时间。 */
             display_result = lcd_show_string(0,
                                              0,
@@ -193,6 +212,17 @@ void app_main(void)
 
         seconds += 1;
         vTaskDelay(pdMS_TO_TICKS(1000));
+
+        #if 1
+        /* 摄像头初始化或上一帧显示成功时，才继续读取下一帧。 */
+        if (camera_result == ESP_OK) {
+            /* 显示一帧 320x240 的 GC0308 图像。 */
+            camera_result = camera_test();
+
+            /* 相机图像在 LCD 上保留 1 秒，再进入下一轮文字显示。 */
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        #endif
     }
 
 #else

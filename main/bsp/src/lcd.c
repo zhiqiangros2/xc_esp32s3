@@ -1,6 +1,7 @@
 #include "lcd.h"
 
 #include <stddef.h>
+#include <string.h>
 
 #include "aw9523b.h"
 #include "driver/gpio.h"
@@ -520,6 +521,81 @@ esp_err_t lcd_draw_pixels(uint16_t x,
         transfer_start_y += current_row_count;
         remaining_rows -= current_row_count;
         source_pixel_index += current_transfer_pixel_count;
+    }
+
+    xSemaphoreGive(lcd_mutex);
+    return result;
+}
+
+/**
+ * @brief 绘制高字节在前的 RGB565 原始字节流。
+ *
+ * GC0308 帧缓冲区已经按照 ST7789 的线路发送顺序保存。这里按完整行把数据
+ * 拆成多批，使用 memcpy() 原样复制到片内 DMA 缓冲区，不调用
+ * rgb565_to_wire_order()。这样既能从 PSRAM 帧缓冲区稳定发送，又不会把正确
+ * 的摄像头字节序再次交换。
+ */
+esp_err_t lcd_draw_rgb565_bytes(uint16_t x,
+                                uint16_t y,
+                                uint16_t width,
+                                uint16_t height,
+                                const uint8_t *pixels)
+{
+    if (!lcd_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (pixels == NULL || !lcd_region_is_valid(x, y, width, height)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* DMA 缓冲区除以每行像素数，得到一次能够发送的最大完整行数。 */
+    const uint16_t maximum_rows_per_transfer =
+        (uint16_t)(LCD_TRANSFER_BUFFER_PIXELS / width);
+    uint16_t transfer_start_y = y;
+    uint16_t remaining_rows = height;
+    size_t source_byte_index = 0;
+    esp_err_t result = ESP_OK;
+
+    /* 独占 LCD 面板和传输缓冲区，防止其他任务在帧传输中间插入绘图。 */
+    xSemaphoreTake(lcd_mutex, portMAX_DELAY);
+
+    while (remaining_rows > 0) {
+        uint16_t current_row_count = remaining_rows;
+        if (current_row_count > maximum_rows_per_transfer) {
+            current_row_count = maximum_rows_per_transfer;
+        }
+
+        /*
+         * 一行有 width 个像素，每个 RGB565 像素固定占 2 字节。摄像头数据
+         * 已经是高字节在前，因此整批原样复制，不逐像素转换。
+         */
+        const size_t current_transfer_byte_count =
+            (size_t)width * current_row_count * sizeof(uint16_t);
+        memcpy(lcd_transfer_buffer,
+               pixels + source_byte_index,
+               current_transfer_byte_count);
+
+        /* 清除旧完成通知，确保后面的等待对应当前这次 DMA 传输。 */
+        while (xSemaphoreTake(lcd_dma_done_semaphore, 0) == pdTRUE) {
+        }
+
+        result = esp_lcd_panel_draw_bitmap(
+            lcd_panel_handle,
+            x,
+            transfer_start_y,
+            x + width,
+            transfer_start_y + current_row_count,
+            lcd_transfer_buffer);
+        if (result != ESP_OK) {
+            break;
+        }
+
+        /* 当前 DMA 完成后，才允许下一批覆盖共用传输缓冲区。 */
+        xSemaphoreTake(lcd_dma_done_semaphore, portMAX_DELAY);
+
+        transfer_start_y += current_row_count;
+        remaining_rows -= current_row_count;
+        source_byte_index += current_transfer_byte_count;
     }
 
     xSemaphoreGive(lcd_mutex);

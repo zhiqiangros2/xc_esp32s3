@@ -71,6 +71,16 @@ typedef enum {
  */
 esp_err_t aw9523b_init(void);
 
+/**
+ * @brief 打开 BOX3 的 VBAT 和模拟 3.3 V 电源。
+ *
+ * 调用前必须先执行 aw9523b_init()。函数将 P1_4/VBAT_EN 和
+ * P1_5/VDDA_3V3_EN 显式拉高；重复调用安全。
+ *
+ * @return ESP_OK 表示两个电源使能均已拉高；否则返回 I2C 操作错误码。
+ */
+esp_err_t aw9523b_enable_box3_power(void);
+
 /** 从指定寄存器读取一个字节。 */
 esp_err_t aw9523b_read_register(uint8_t register_address, uint8_t *value);
 

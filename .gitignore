@@ -5,6 +5,9 @@
 /sdkconfig
 /sdkconfig.old
 
+# ESP-IDF Component Manager 每次配置时都会重新生成；本项目组件均已内置。
+/dependencies.lock
+
 # 本地调试日志。
 /debug.log
 
