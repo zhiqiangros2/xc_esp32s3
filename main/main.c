@@ -26,7 +26,7 @@ static const char *TAG = "BOX3";
 
 void app_main(void)
 {
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    //vTaskDelay(pdMS_TO_TICKS(10000));
 
     /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
     esp_err_t err = nvs_flash_init();
@@ -146,7 +146,7 @@ void app_main(void)
                  esp_err_to_name(littlefs_result));
     }
 
-#if 1
+#if 0
     /*
      * LVGL 接入前使用的直接 LCD 绘图示例保留在本代码块中。当前 #if 1
      * 表示启用直接 LCD 测试；由于下面包含无限循环，程序不会继续执行后面的
@@ -300,12 +300,12 @@ void app_main(void)
      * 左上角。转换后，触摸位置与屏幕上对应的 LVGL 控件坐标一致。
      *
      * CHSC5432 的 I2C 读取只在 GPIO42 中断管理任务中执行。触摸驱动完成
-     * 坐标转换后，把完整状态发送到 FreeRTOS 消息队列；独立触摸任务永久
-     * 阻塞等待队列，收到消息后获取 LVGL 全局互斥锁并直接上报输入状态。
-     * 主 LVGL 任务只负责定时器和显示刷新，不会周期轮询 I2C。
+     * 坐标转换后，把完整状态发送到 FreeRTOS 消息队列；LVGL 任务在两次
+     * 定时器处理之间阻塞等待该队列，同时负责输入事件和显示刷新。
      */
     ESP_ERROR_CHECK(lvgl_port_init());
     ESP_ERROR_CHECK(lvgl_ui_init());
+    ESP_ERROR_CHECK(lvgl_port_start());
 
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));

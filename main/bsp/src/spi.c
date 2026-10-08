@@ -80,6 +80,18 @@ void *board_spi_dma_alloc(size_t size)
                                     MALLOC_CAP_INTERNAL);
 }
 
+void *board_spi_psram_dma_alloc(size_t size)
+{
+    if (!spi2_initialized || size == 0) {
+        return NULL;
+    }
+
+    /* ESP32-S3 的 GDMA 可直接读取 PSRAM；分配器同时满足外部 DMA 对齐要求。 */
+    return spi_bus_dma_memory_alloc(BOARD_SPI_HOST,
+                                    size,
+                                    MALLOC_CAP_SPIRAM);
+}
+
 void board_spi_dma_free(void *memory)
 {
     heap_caps_free(memory);

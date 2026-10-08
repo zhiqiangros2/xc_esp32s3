@@ -19,6 +19,9 @@
 #define LCD_COLOR_WHITE 0xFFFFU   /* 白色 */
 #define LCD_COLOR_LGRAY 0xC618U   /* 浅灰色 */
 
+/** LCD 异步颜色传输完成回调，在 SPI DMA 完成中断中执行。 */
+typedef bool (*lcd_transfer_done_callback_t)(void *user_context);
+
 /**
  * @brief 初始化 BOX3 的 2.4 英寸 ST7789V2 LCD。
  *
@@ -71,7 +74,7 @@ esp_err_t lcd_fill_rect(uint16_t x,
  *              | height
  *              v LCD Y 向下
  *
- * 该排列与 LVGL 的 RGB565 局部刷新缓冲区一致，不需要旋转或交换 X/Y。
+ * 该排列与 LVGL 的 RGB565 显示缓冲区一致，不需要旋转或交换 X/Y。
  * 矩形内每个像素都会被 pixels 中对应的颜色覆盖，没有透明背景。函数内部
  * 按 DMA 缓冲区容量分批发送，并等待全部 SPI DMA 传输完成后才返回；返回
  * 后调用者可以立即修改或释放 pixels。
@@ -90,6 +93,22 @@ esp_err_t lcd_draw_pixels(uint16_t x,
                           uint16_t width,
                           uint16_t height,
                           const uint16_t *pixels);
+
+/**
+ * @brief 异步发送已经按 LCD 字节序排列的 DMA 像素缓冲区。
+ *
+ * pixels 必须位于 DMA 可访问内存，并在 done_callback 被调用前保持不变。
+ * 大于 SPI2 单次传输上限的数据由 ESP-IDF 自动拆分；函数成功返回仅表示全部
+ * 分段已经提交，最后一段 DMA 完成后在中断上下文调用 done_callback。
+ */
+esp_err_t lcd_draw_rgb565_bytes_async(
+    uint16_t x,
+    uint16_t y,
+    uint16_t width,
+    uint16_t height,
+    const uint8_t *pixels,
+    lcd_transfer_done_callback_t done_callback,
+    void *user_context);
 
 /**
  * @brief 绘制已经按 LCD 传输字节序排列的 RGB565 图像。

@@ -33,7 +33,7 @@
 static const char *TAG = "LCD";
 static esp_lcd_panel_io_handle_t lcd_io_handle = NULL;
 static esp_lcd_panel_handle_t lcd_panel_handle = NULL;
-static SemaphoreHandle_t lcd_mutex = NULL;
+static SemaphoreHandle_t lcd_access_semaphore = NULL;
 /*
  * LCD DMA 传输完成二值信号量：
  *
@@ -45,6 +45,9 @@ static SemaphoreHandle_t lcd_mutex = NULL;
  */
 static SemaphoreHandle_t lcd_dma_done_semaphore = NULL;
 static uint16_t *lcd_transfer_buffer = NULL;
+static volatile bool lcd_async_transfer_pending = false;
+static lcd_transfer_done_callback_t lcd_async_done_callback = NULL;
+static void *lcd_async_user_context = NULL;
 static bool lcd_initialized = false;
 
 static uint16_t rgb565_to_wire_order(uint16_t color)
@@ -66,9 +69,27 @@ static bool lcd_color_transfer_done(esp_lcd_panel_io_handle_t panel_io,
     (void)panel_io;
     (void)event_data;
 
+    (void)user_context;
+
     BaseType_t task_woken = pdFALSE;
-    /* DMA 已完成，将二值信号量置为可取状态，唤醒正在等待的发送任务。 */
-    xSemaphoreGiveFromISR((SemaphoreHandle_t)user_context, &task_woken);
+    if (lcd_async_transfer_pending) {
+        lcd_transfer_done_callback_t callback = lcd_async_done_callback;
+        void *callback_context = lcd_async_user_context;
+
+        lcd_async_transfer_pending = false;
+        lcd_async_done_callback = NULL;
+        lcd_async_user_context = NULL;
+
+        /* DMA 已不再读取外部缓冲区，可以开始下一次 LCD 传输。 */
+        xSemaphoreGiveFromISR(lcd_access_semaphore, &task_woken);
+        if (callback != NULL && callback(callback_context)) {
+            task_woken = pdTRUE;
+        }
+    } else {
+        /* 同步绘图接口仍由等待任务处理完成通知。 */
+        xSemaphoreGiveFromISR(lcd_dma_done_semaphore, &task_woken);
+    }
+
     return task_woken == pdTRUE;
 }
 
@@ -193,10 +214,14 @@ static void lcd_release_resources(void)
         vSemaphoreDelete(lcd_dma_done_semaphore);
         lcd_dma_done_semaphore = NULL;
     }
-    if (lcd_mutex != NULL) {
-        vSemaphoreDelete(lcd_mutex);
-        lcd_mutex = NULL;
+    if (lcd_access_semaphore != NULL) {
+        vSemaphoreDelete(lcd_access_semaphore);
+        lcd_access_semaphore = NULL;
     }
+
+    lcd_async_transfer_pending = false;
+    lcd_async_done_callback = NULL;
+    lcd_async_user_context = NULL;
 }
 
 /**
@@ -220,13 +245,14 @@ esp_err_t lcd_init(void)
         return result;
     }
 
-    /* 互斥锁保护绘图缓冲区；二值信号量等待 SPI DMA 传输完成。 */
-    lcd_mutex = xSemaphoreCreateMutex();
+    /* 访问令牌串行化同步绘图和异步 DMA；完成信号量供同步接口等待。 */
+    lcd_access_semaphore = xSemaphoreCreateBinary();
     lcd_dma_done_semaphore = xSemaphoreCreateBinary();
-    if (lcd_mutex == NULL || lcd_dma_done_semaphore == NULL) {
+    if (lcd_access_semaphore == NULL || lcd_dma_done_semaphore == NULL) {
         lcd_release_resources();
         return ESP_ERR_NO_MEM;
     }
+    xSemaphoreGive(lcd_access_semaphore);
 
     /* 分配片内 DMA 缓冲区，填充和位图绘制均通过该缓冲区分块发送。 */
     lcd_transfer_buffer = board_spi_dma_alloc(
@@ -246,15 +272,18 @@ esp_err_t lcd_init(void)
         .spi_mode = 0,
         /* LCD 的 SPI 工作时钟为 60 MHz。 */
         .pclk_hz = LCD_PIXEL_CLOCK_HZ,
-        /* 只允许一个异步颜色传输排队，与单个 DMA 缓冲区配合使用。 */
-        .trans_queue_depth = 1,
+        /* 允许全屏数据拆分后连续排队，和参考工程保持相同队列深度。 */
+        .trans_queue_depth = 7,
         /* 颜色数据 DMA 发送完成后，由回调通知缓冲区可以再次使用。 */
         .on_color_trans_done = lcd_color_transfer_done,
-        /* 将传输完成信号量作为回调上下文传入。 */
-        .user_ctx = lcd_dma_done_semaphore,
+        .user_ctx = NULL,
         /* ST7789V2 的命令和参数均按 8 位发送。 */
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
+        .flags = {
+            /* LVGL 全屏缓冲位于 PSRAM，由 ESP32-S3 GDMA 直接读取。 */
+            .psram_dma_direct = 1,
+        },
     };
 
     result = esp_lcd_new_panel_io_spi(
@@ -335,13 +364,13 @@ esp_err_t lcd_init(void)
 
     /* 显示开启前先清成黑色，避免背光点亮时出现旧显存内容。 */
     if (result == ESP_OK) {
-        xSemaphoreTake(lcd_mutex, portMAX_DELAY);
+        xSemaphoreTake(lcd_access_semaphore, portMAX_DELAY);
         result = lcd_fill_rect_locked(0,
                                       0,
                                       LCD_X_RESOLUTION,
                                       LCD_Y_RESOLUTION,
                                       LCD_COLOR_BLACK);
-        xSemaphoreGive(lcd_mutex);
+        xSemaphoreGive(lcd_access_semaphore);
     }
     /* 向 ST7789 发送 DISPON 命令以开启画面输出；此操作不会点亮 LCD 背光。 */
     if (result == ESP_OK) {
@@ -398,9 +427,9 @@ esp_err_t lcd_fill_rect(uint16_t x,
         return ESP_ERR_INVALID_ARG;
     }
 
-    xSemaphoreTake(lcd_mutex, portMAX_DELAY);
+    xSemaphoreTake(lcd_access_semaphore, portMAX_DELAY);
     esp_err_t result = lcd_fill_rect_locked(x, y, width, height, color);
-    xSemaphoreGive(lcd_mutex);
+    xSemaphoreGive(lcd_access_semaphore);
     return result;
 }
 
@@ -436,8 +465,9 @@ esp_err_t lcd_fill_rect(uint16_t x,
  *  3. 启动当前矩形分块的 SPI DMA 传输；
  *  4. 等待 DMA 完成，再复用同一个传输缓冲区处理下一批。
  *
- * lcd_mutex 会保证多个任务不会同时使用 LCD 和共享 DMA 缓冲区。函数等待
- * 最后一批 DMA 完成后才释放互斥锁并返回，因此返回后 pixels 可以立即复用。
+ * lcd_access_semaphore 会保证多个任务不会同时使用 LCD 和共享 DMA 缓冲区。
+ * 函数等待最后一批 DMA 完成后才释放访问令牌并返回，因此返回后 pixels
+ * 可以立即复用。
  *
  * @param[in] x 目标矩形左上角的 LCD X 坐标。
  * @param[in] y 目标矩形左上角的 LCD Y 坐标。
@@ -474,7 +504,7 @@ esp_err_t lcd_draw_pixels(uint16_t x,
     esp_err_t result = ESP_OK;
 
     /* 独占 LCD 面板和共享 DMA 缓冲区，避免其他任务同时绘图。 */
-    xSemaphoreTake(lcd_mutex, portMAX_DELAY);
+    xSemaphoreTake(lcd_access_semaphore, portMAX_DELAY);
 
     while (remaining_rows > 0) {
         /* 最后一批可能不足最大行数，只发送实际剩余的完整行。 */
@@ -523,7 +553,51 @@ esp_err_t lcd_draw_pixels(uint16_t x,
         source_pixel_index += current_transfer_pixel_count;
     }
 
-    xSemaphoreGive(lcd_mutex);
+    xSemaphoreGive(lcd_access_semaphore);
+    return result;
+}
+
+esp_err_t lcd_draw_rgb565_bytes_async(
+    uint16_t x,
+    uint16_t y,
+    uint16_t width,
+    uint16_t height,
+    const uint8_t *pixels,
+    lcd_transfer_done_callback_t done_callback,
+    void *user_context)
+{
+    if (!lcd_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (pixels == NULL || done_callback == NULL ||
+        !lcd_region_is_valid(x, y, width, height)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /*
+     * 访问令牌由本任务取得、DMA 完成中断释放。传输期间 LCD 不会被其他同步
+     * 绘图接口使用，LVGL 传入的 DMA 缓冲区也会一直保持有效。
+     */
+    xSemaphoreTake(lcd_access_semaphore, portMAX_DELAY);
+    lcd_async_done_callback = done_callback;
+    lcd_async_user_context = user_context;
+    lcd_async_transfer_pending = true;
+
+    const esp_err_t result = esp_lcd_panel_draw_bitmap(lcd_panel_handle,
+                                                        x,
+                                                        y,
+                                                        x + width,
+                                                        y + height,
+                                                        pixels);
+    if (result != ESP_OK) {
+        /* 未启动 DMA 时不会产生完成中断，必须在当前任务中归还访问令牌。 */
+        lcd_async_transfer_pending = false;
+        lcd_async_done_callback = NULL;
+        lcd_async_user_context = NULL;
+        xSemaphoreGive(lcd_access_semaphore);
+    }
+
     return result;
 }
 
@@ -557,7 +631,7 @@ esp_err_t lcd_draw_rgb565_bytes(uint16_t x,
     esp_err_t result = ESP_OK;
 
     /* 独占 LCD 面板和传输缓冲区，防止其他任务在帧传输中间插入绘图。 */
-    xSemaphoreTake(lcd_mutex, portMAX_DELAY);
+    xSemaphoreTake(lcd_access_semaphore, portMAX_DELAY);
 
     while (remaining_rows > 0) {
         uint16_t current_row_count = remaining_rows;
@@ -598,6 +672,6 @@ esp_err_t lcd_draw_rgb565_bytes(uint16_t x,
         source_byte_index += current_transfer_byte_count;
     }
 
-    xSemaphoreGive(lcd_mutex);
+    xSemaphoreGive(lcd_access_semaphore);
     return result;
 }

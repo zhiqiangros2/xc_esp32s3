@@ -24,7 +24,10 @@ spi_host_device_t board_spi_get_host(void);
 /** 分配可用于 SPI2 DMA 传输的片内内存。 */
 void *board_spi_dma_alloc(size_t size);
 
-/** 释放 board_spi_dma_alloc() 分配的内存。 */
+/** 分配可由 SPI2 直接 DMA 读取的 PSRAM 内存。 */
+void *board_spi_psram_dma_alloc(size_t size);
+
+/** 释放 board_spi_dma_alloc() 或 board_spi_psram_dma_alloc() 分配的内存。 */
 void board_spi_dma_free(void *memory);
 
 /** 应用程序不再使用 LCD 和 SD 后，释放 SPI2 总线。 */

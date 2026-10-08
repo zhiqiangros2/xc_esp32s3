@@ -1,6 +1,16 @@
 #include "lvgl_test_page.h"
 
-/** 点击测试页面左上角的 Back 按钮后切换回主界面。 */
+static lv_obj_t *s_back_label;
+
+/** 页面被删除后清除内部控件指针，避免后续语言切换访问已释放对象。 */
+static void test_page_deleted(lv_event_t *event)
+{
+    if (lv_event_get_code(event) == LV_EVENT_DELETE) {
+        s_back_label = NULL;
+    }
+}
+
+/** 返回主界面，并在当前事件处理完成后销毁测试页面。 */
 static void back_button_clicked(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
@@ -10,11 +20,33 @@ static void back_button_clicked(lv_event_t *event)
     /* 创建按钮时通过 user_data 保存了需要返回的主界面。 */
     lv_obj_t *main_page = lv_event_get_user_data(event);
     if (main_page != NULL) {
+        lv_obj_t *test_page = lv_obj_get_screen(lv_event_get_target(event));
         lv_screen_load(main_page);
+        lv_obj_delete_async(test_page);
     }
 }
 
-lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page)
+void lvgl_test_page_set_language(lvgl_language_t language,
+                                 const lv_font_t *ui_font)
+{
+    if (s_back_label == NULL) {
+        return;
+    }
+
+    const lvgl_language_texts_t *texts = lvgl_language_get_texts(language);
+    const lv_font_t *font = LV_FONT_DEFAULT;
+    if (language == LVGL_LANGUAGE_ZH_CN && ui_font != NULL) {
+        font = ui_font;
+    }
+
+    lv_label_set_text(s_back_label, texts->back);
+    lv_obj_set_style_text_font(s_back_label, font, 0);
+    lv_obj_center(s_back_label);
+}
+
+lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
+                                lvgl_language_t language,
+                                const lv_font_t *ui_font)
 {
     if (main_page == NULL) {
         return NULL;
@@ -29,12 +61,17 @@ lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page)
         return NULL;
     }
 
+    lv_obj_add_event_cb(test_page,
+                        test_page_deleted,
+                        LV_EVENT_DELETE,
+                        NULL);
+
     /* 测试页面使用浅灰背景和深色文字，与主界面形成直观区别。 */
     lv_obj_set_style_bg_color(test_page, lv_color_hex(0xF2F4F7), 0);
     lv_obj_set_style_bg_opa(test_page, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(test_page, lv_color_hex(0x17202A), 0);
 
-    /* Back 按钮紧贴测试页面右下角，文字在按钮内部保持居中。 */
+    /* 返回按钮紧贴测试页面右下角，文字在按钮内部保持居中。 */
     lv_obj_t *back_button = lv_button_create(test_page);
     lv_obj_set_size(back_button, 76, 44);
     lv_obj_align(back_button, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
@@ -48,15 +85,9 @@ lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page)
                         LV_EVENT_CLICKED,
                         main_page);
 
-    lv_obj_t *back_label = lv_label_create(back_button);
-    lv_label_set_text(back_label, "Back");
-    lv_obj_set_style_text_color(back_label, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_center(back_label);
-
-    /* 页面标题居中显示，明确表示当前已经进入新的页面。 */
-    lv_obj_t *page_title = lv_label_create(test_page);
-    lv_label_set_text(page_title, "New Page");
-    lv_obj_align(page_title, LV_ALIGN_CENTER, 0, 0);
+    s_back_label = lv_label_create(back_button);
+    lv_obj_set_style_text_color(s_back_label, lv_color_hex(0xFFFFFF), 0);
+    lvgl_test_page_set_language(language, ui_font);
 
     return test_page;
 }

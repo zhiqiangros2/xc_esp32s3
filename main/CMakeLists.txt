@@ -14,6 +14,8 @@ idf_component_register(
         "bsp/src/fatfs.c"
         "bsp/src/littlefs.c"
         "bsp/src/tp.c"
+        "app/src/lvgl_font.c"
+        "app/src/lvgl_language.c"
         "app/src/lvgl_port.c"
         "app/src/lvgl_test_page.c"
         "app/src/lvgl_ui.c"
