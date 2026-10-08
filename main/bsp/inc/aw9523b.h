@@ -81,6 +81,22 @@ esp_err_t aw9523b_init(void);
  */
 esp_err_t aw9523b_enable_box3_power(void);
 
+/**
+ * @brief 设置 BOX3 触摸控制器和摄像头共用的复位电平。
+ *
+ * asserted=true 拉低 P1_7，asserted=false 拉高 P1_7。调用者负责在电平
+ * 变化后按器件要求等待；tp_init() 会使用此接口完成完整复位时序。
+ */
+esp_err_t aw9523b_set_box3_touch_camera_reset(bool asserted);
+
+/**
+ * @brief 打开 BOX3 板载 GC0308 的 2.8 V 电源。
+ *
+ * 调用前应先通过 aw9523b_set_box3_touch_camera_reset(true) 保持共享复位，
+ * 并完成 aw9523b_enable_box3_power()。本函数只操作 P1_6，重复调用安全。
+ */
+esp_err_t aw9523b_enable_box3_camera_power(void);
+
 /** 从指定寄存器读取一个字节。 */
 esp_err_t aw9523b_read_register(uint8_t register_address, uint8_t *value);
 

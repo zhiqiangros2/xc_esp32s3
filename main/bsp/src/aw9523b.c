@@ -20,6 +20,7 @@
 #define AW9523B_I2C_FREQUENCY_HZ 400000
 #define AW9523B_I2C_TIMEOUT_MS 100
 #define AW9523B_INTERRUPT_DEBOUNCE_MS 20
+#define AW9523B_CAMERA_POWER_STABILIZE_DELAY_MS 50U
 
 /* AW9523B 数据手册寄存器地址。 */
 #define AW9523B_REG_INPUT_PORT0_0x00 0x00
@@ -56,6 +57,7 @@ static bool aw9523b_initialized = false;
 static uint8_t previous_port0_input_levels = 0;
 static TickType_t last_key_change_ticks[AW9523B_PINS_PER_PORT] = {0};
 static bool aw9523b_interrupt_initialized = false;
+static bool box3_camera_powered = false;
 static bool red_led_on = false;
 static bool blue_led_on = false;
 
@@ -484,6 +486,54 @@ esp_err_t aw9523b_enable_box3_power(void)
     return ESP_OK;
 }
 
+esp_err_t aw9523b_set_box3_touch_camera_reset(bool asserted)
+{
+    if (!aw9523b_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const esp_err_t result = aw9523b_write_gpio(
+        AW9523B_PORT_1,
+        AW9523B_BOX3_TOUCH_CAMERA_RESET,
+        !asserted);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Failed to %s TP/Camera reset: %s",
+                 asserted ? "assert" : "release",
+                 esp_err_to_name(result));
+        return result;
+    }
+
+    ESP_LOGI(TAG,
+             "TP/Camera reset %s",
+             asserted ? "asserted (P1_7=low)" : "released (P1_7=high)");
+    return ESP_OK;
+}
+
+esp_err_t aw9523b_enable_box3_camera_power(void)
+{
+    if (!aw9523b_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (box3_camera_powered) {
+        return ESP_OK;
+    }
+
+    esp_err_t result = aw9523b_write_gpio(AW9523B_PORT_1,
+                                          AW9523B_BOX3_VDD_2V8_ENABLE,
+                                          true);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable GC0308 VDD_2V8: %s",
+                 esp_err_to_name(result));
+        return result;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(AW9523B_CAMERA_POWER_STABILIZE_DELAY_MS));
+    box3_camera_powered = true;
+    ESP_LOGI(TAG, "GC0308 power ready: RESET=low, VDD_2V8=on");
+    return ESP_OK;
+}
+
 esp_err_t aw9523b_interrupt_init(void)
 {
     if (!aw9523b_initialized) {
@@ -570,6 +620,7 @@ esp_err_t aw9523b_soft_reset(void)
 
     if (result == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(1));
+        box3_camera_powered = false;
     }
     return result;
 }

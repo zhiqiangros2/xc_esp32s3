@@ -4,25 +4,14 @@
 #include "esp_err.h"
 
 /**
- * @brief 打开 BOX3 板载 GC0308 的供电。
- *
- * @details 调用前必须先完成 board_i2c_init()、aw9523b_init() 和
- * aw9523b_enable_box3_power()。本函数先把与 CHSC5432 共用的 P1_7 复位脚
- * 拉低，再通过 P1_6 使能 VDD_2V8。必须在 tp_init() 之前调用，使 GC0308
- * 在复位保持期间稳定上电；tp_init() 随后负责释放共享复位。重复调用安全。
- *
- * @return ESP_OK 表示供电已经使能；I2C/AW9523B 操作失败时返回对应错误码。
- */
-esp_err_t camera_power_on(void);
-
-/**
  * @brief 初始化 BOX3 板载 GC0308 摄像头。
  *
- * @details 调用本函数前必须先完成 board_i2c_init() 和 aw9523b_init()。
+ * @details 调用本函数前必须先完成 board_i2c_init()、aw9523b_init()、
+ * aw9523b_enable_box3_power() 和 aw9523b_enable_box3_camera_power()。
  * 摄像头的 SCCB 配置接口与 AW9523B 共用 I2C0；图像数据则通过独立的
  * 8 位 DVP 总线送入 ESP32-S3，不占用 LCD/SD 使用的 SPI2。
  *
- * camera_power_on() 已在共享复位保持为低电平时打开摄像头电源，tp_init()
+ * aw9523b_enable_box3_camera_power() 已在共享复位保持为低电平时打开摄像头电源，tp_init()
  * 随后通过 AW9523B P1_7 完成 CHSC5432 和 GC0308 的共用硬件复位。本函数
  * 必须在这两个步骤之后调用，并依次执行以下操作：
  *

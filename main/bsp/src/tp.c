@@ -9,7 +9,6 @@
 #include <stddef.h>
 #include <string.h>
 
-#include "aw9523b.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -38,8 +37,6 @@
 #define TP_EXPECTED_X_RESOLUTION 240U
 #define TP_EXPECTED_Y_RESOLUTION 320U
 
-#define TP_RESET_LOW_DELAY_MS 100
-#define TP_RESET_BOOT_DELAY_MS 100
 #define TP_STATE_QUEUE_LENGTH 8U
 
 static const char *TAG = "TP";
@@ -161,30 +158,6 @@ static esp_err_t validate_controller_info(const tp_controller_info_t *info)
         return ESP_ERR_INVALID_RESPONSE;
     }
 
-    return ESP_OK;
-}
-
-/** TP_CAM_RESET 为低电平时复位，拉高后等待触摸芯片完成启动。 */
-static esp_err_t reset_touch_controller(void)
-{
-    esp_err_t result = aw9523b_write_gpio(
-        AW9523B_PORT_1,
-        AW9523B_BOX3_TOUCH_CAMERA_RESET,
-        false);
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(TP_RESET_LOW_DELAY_MS));
-
-    result = aw9523b_write_gpio(AW9523B_PORT_1,
-                                AW9523B_BOX3_TOUCH_CAMERA_RESET,
-                                true);
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(TP_RESET_BOOT_DELAY_MS));
     return ESP_OK;
 }
 
@@ -381,13 +354,6 @@ esp_err_t tp_init(void)
                                              TP_I2C_FREQUENCY_HZ,
                                              &tp_device_handle);
     if (result != ESP_OK) {
-        return result;
-    }
-
-    result = reset_touch_controller();
-    if (result != ESP_OK) {
-        ESP_LOGE(TAG, "Touch reset failed: %s", esp_err_to_name(result));
-        release_init_resources();
         return result;
     }
 

@@ -4,11 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "aw9523b.h"
 #include "esp_camera.h"
 #include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "hal/i2c_types.h"
 #include "lcd.h"
 
@@ -31,9 +28,7 @@
 #define CAMERA_XCLK_GPIO GPIO_NUM_NC
 #define CAMERA_XCLK_FREQUENCY_HZ 24000000U
 
-#define CAMERA_POWER_STABILIZE_DELAY_MS 50U
 static const char *TAG = "CAMERA";
-static bool camera_powered = false;
 static bool camera_initialized = false;
 
 /*
@@ -79,45 +74,10 @@ static const camera_config_t camera_config = {
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
 };
 
-esp_err_t camera_power_on(void)
-{
-    if (camera_powered) {
-        return ESP_OK;
-    }
-
-    /* 上电前保持 GC0308 和 CHSC5432 的共用复位为低，避免传感器干扰 SCCB。 */
-    esp_err_t result = aw9523b_write_gpio(
-        AW9523B_PORT_1,
-        AW9523B_BOX3_TOUCH_CAMERA_RESET,
-        false);
-    if (result != ESP_OK) {
-        return result;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    /* 上游 VBAT 已由板级电源函数接通，这里通过 P1_6 使能 GC0308 的 2.8 V。 */
-    result = aw9523b_write_gpio(AW9523B_PORT_1,
-                                AW9523B_BOX3_VDD_2V8_ENABLE,
-                                true);
-    if (result != ESP_OK) {
-        return result;
-    }
-    vTaskDelay(pdMS_TO_TICKS(CAMERA_POWER_STABILIZE_DELAY_MS));
-    camera_powered = true;
-    ESP_LOGI(TAG, "GC0308 power ready: RESET=low, VDD_2V8=on");
-    return ESP_OK;
-}
-
 esp_err_t camera_init(void)
 {
     if (camera_initialized) {
         return ESP_OK;
-    }
-
-    if (!camera_powered) {
-        ESP_LOGE(TAG, "Call camera_power_on() before tp_init() and camera_init()");
-        return ESP_ERR_INVALID_STATE;
     }
 
     esp_err_t result = esp_camera_init(&camera_config);

@@ -50,8 +50,10 @@ void app_main(void)
     ESP_ERROR_CHECK(aw9523b_init());
     ESP_ERROR_CHECK(aw9523b_enable_box3_power());
 
-    /* 让 GC0308 保持复位，再使能其 2.8 V 电源。 */
-    ESP_ERROR_CHECK(camera_power_on());
+    /* 分开控制共享复位和 GC0308 2.8 V 电源，保持摄像头处于复位状态上电。 */
+    ESP_ERROR_CHECK(aw9523b_set_box3_touch_camera_reset(true));
+    vTaskDelay(pdMS_TO_TICKS(50));
+    ESP_ERROR_CHECK(aw9523b_enable_box3_camera_power());
 
     /* 确保板载红、蓝 LED 均处于熄灭状态。 */
     ESP_ERROR_CHECK(aw9523b_set_box3_led(AW9523B_BOX3_LED_RED, false));
@@ -61,10 +63,12 @@ void app_main(void)
     ESP_ERROR_CHECK(aw9523b_interrupt_init());
 
     /*
-     * GC0308 与 CHSC5432 共用 AW9523B P1_7 复位信号。camera_power_on()
-     * 已经保持 P1_7 为低并给 GC0308 上电；现在由触摸驱动在电源稳定后
-     * 统一释放复位，避免 GC0308 在不完整的上电状态下拉住 I2C/SCCB。
+     * GC0308 与 CHSC5432 共用 AW9523B P1_7 复位信号。摄像头上电期间保持复位，
+     * 这里释放复位并等待 200 ms，随后再初始化触摸控制器。
      */
+    ESP_ERROR_CHECK(aw9523b_set_box3_touch_camera_reset(false));
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     ESP_ERROR_CHECK(tp_init());
 
     esp_err_t camera_result = camera_init();
