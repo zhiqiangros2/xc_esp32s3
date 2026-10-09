@@ -29,6 +29,9 @@ esp_err_t board_i2c_add_device(uint16_t device_address,
                                uint32_t clock_speed_hz,
                                board_i2c_device_handle_t *device);
 
+/** Probe a 7-bit address on the initialized board I2C bus. */
+esp_err_t board_i2c_probe(uint16_t device_address, int timeout_ms);
+
 /** Remove a device previously added with board_i2c_add_device(). */
 esp_err_t board_i2c_remove_device(board_i2c_device_handle_t device);
 

@@ -2,10 +2,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "audio_i2s.h"
 #include "aw9523b.h"
 #include "bsp_info.h"
 #include "camera.h"
 #include "display.h"
+#include "es8311.h"
 #include "fatfs.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -21,12 +23,15 @@
 #include "sd_fatfs.h"
 #include "spi.h"
 #include "tp.h"
+#include "wav_player.h"
+
+#define AUDIO_STARTUP_SAMPLE_RATE_HZ 48000U
 
 static const char *TAG = "BOX3";
 
 void app_main(void)
 {
-    //vTaskDelay(pdMS_TO_TICKS(10000));
+    vTaskDelay(pdMS_TO_TICKS(10000));
 
     /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
     esp_err_t err = nvs_flash_init();
@@ -46,7 +51,7 @@ void app_main(void)
     /* 初始化板级 I2C0 总线，后续 AW9523B 和触摸屏共用该总线。 */
     ESP_ERROR_CHECK(board_i2c_init());
 
-    /* 初始化 AW9523B 后显式打开上游 VBAT 和模拟 3.3 V 电源。 */
+    /* 初始化 AW9523B 后打开 VBAT、数字 3.3 V 和模拟 3.3 V 电源。 */
     ESP_ERROR_CHECK(aw9523b_init());
     ESP_ERROR_CHECK(aw9523b_enable_box3_power());
 
@@ -152,11 +157,24 @@ void app_main(void)
                  esp_err_to_name(littlefs_result));
     }
 
+    /*
+     * ES8311 使用 I2S 时钟作为内部工作时钟，因此先启动 48 kHz I2S，
+     * 等待时钟稳定后再通过 I2C 初始化 Codec。初始化完成后解除静音并
+     * 打开功放，后续停止播放时仍保持音频输出开启。
+     */
+    ESP_ERROR_CHECK(audio_i2s_init(AUDIO_STARTUP_SAMPLE_RATE_HZ));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    /* es8311_init() 内部解除静音，之后持续保持 Codec 音频输出开启。 */
+    ESP_ERROR_CHECK(es8311_init());
+    ESP_ERROR_CHECK(aw9523b_set_box3_pa_enabled(true));
+
+    /* 播放器任务按需打开 SD 文件和音频硬件，不会阻塞 LVGL 事件处理。 */
+    ESP_ERROR_CHECK(wav_player_init());
+
 #if 0
     /*
-     * LVGL 接入前使用的直接 LCD 绘图示例保留在本代码块中。当前 #if 1
-     * 表示启用直接 LCD 测试；由于下面包含无限循环，程序不会继续执行后面的
-     * LVGL 初始化。字符显示验证完成后改回 #if 0，即可恢复 LVGL 界面。
+     * LVGL 接入前使用的直接 LCD 绘图示例保留在本代码块中。当前 #if 0
+     * 表示关闭直接 LCD 测试，让程序继续执行后面的 LVGL 初始化。
      */
 
     /*

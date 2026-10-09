@@ -13,21 +13,14 @@
 
 ## 复制到 SD 卡
 
-建议在 SD 卡根目录创建 `music` 文件夹，并使用 ASCII 短文件名：
+在 SD 卡根目录创建 `music` 文件夹，然后把 WAV 文件复制进去：
 
 ```text
-/sdcard/music/MUSIC01.WAV
-/sdcard/music/MUSIC02.WAV
+/sdcard/music/最美的期待.WAV
+/sdcard/music/风起天阑.WAV
 ```
 
-建议的文件名对应关系：
-
-```text
-周笔畅-最美的期待.WAV -> MUSIC01.WAV
-风起天阑.WAV          -> MUSIC02.WAV
-```
-
-当前工程配置为 `CONFIG_FATFS_LFN_NONE=y`，不支持按中文长文件名访问文件。若需要保留中文文件名，应改为启用：
+当前工程已经启用以下配置，可以通过 UTF-8 中文长文件名访问 SD 卡：
 
 ```ini
 CONFIG_FATFS_LFN_HEAP=y
@@ -38,4 +31,4 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 
 这两个 WAV 的 `fmt ` 数据块长度为 18 字节，音频数据从文件偏移 46 字节开始。播放器应按 RIFF 数据块结构查找 `data`，不要固定跳过 44 字节。
 
-当前工程尚未实现 WAV 播放、I2S 输出和音频芯片驱动。将文件复制到 SD 卡后，还需要播放器代码才能输出声音。
+当前播放器支持 PCM、双声道、16 bit WAV，并根据文件头设置 I2S 采样率。测试页面左上角的“音乐”按钮会在点击时创建音乐页面，扫描 `/sdcard/music`；关闭页面时会停止播放并销毁页面。

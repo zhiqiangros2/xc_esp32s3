@@ -88,6 +88,23 @@ esp_err_t board_i2c_add_device(uint16_t device_address,
                                      device);
 }
 
+esp_err_t board_i2c_probe(uint16_t device_address, int timeout_ms)
+{
+    if (!i2c_initialized || i2c_bus_handle == NULL || i2c_bus_mutex == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (device_address > 0x7F || timeout_ms < 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    xSemaphoreTake(i2c_bus_mutex, portMAX_DELAY);
+    const esp_err_t result = i2c_master_probe(i2c_bus_handle,
+                                               device_address,
+                                               timeout_ms);
+    xSemaphoreGive(i2c_bus_mutex);
+    return result;
+}
+
 esp_err_t board_i2c_remove_device(board_i2c_device_handle_t device)
 {
     if (device == NULL) {

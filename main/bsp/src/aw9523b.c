@@ -21,6 +21,7 @@
 #define AW9523B_I2C_TIMEOUT_MS 100
 #define AW9523B_INTERRUPT_DEBOUNCE_MS 20
 #define AW9523B_CAMERA_POWER_STABILIZE_DELAY_MS 50U
+#define AW9523B_BOARD_POWER_STABILIZE_DELAY_MS 100U
 
 /* AW9523B 数据手册寄存器地址。 */
 #define AW9523B_REG_INPUT_PORT0_0x00 0x00
@@ -456,6 +457,14 @@ esp_err_t aw9523b_set_box3_lcd_backlight(bool on)
                               !on);
 }
 
+esp_err_t aw9523b_set_box3_pa_enabled(bool enabled)
+{
+    /* P0 已配置为推挽输出；PA_CTRL 为高电平使能。 */
+    return aw9523b_write_gpio(AW9523B_PORT_0,
+                              AW9523B_BOX3_PA_CONTROL,
+                              enabled);
+}
+
 esp_err_t aw9523b_set_box3_led(aw9523b_p1_pin_t led, bool on)
 {
     if (led != AW9523B_BOX3_LED_RED && led != AW9523B_BOX3_LED_BLUE) {
@@ -481,6 +490,16 @@ esp_err_t aw9523b_enable_box3_power(void)
     }
 
     result = aw9523b_write_gpio(AW9523B_PORT_1,
+                                AW9523B_BOX3_VDD_3V3_ENABLE,
+                                true);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Failed to enable VDD_3V3: %s",
+                 esp_err_to_name(result));
+        return result;
+    }
+
+    result = aw9523b_write_gpio(AW9523B_PORT_1,
                                 AW9523B_BOX3_VDDA_3V3_ENABLE,
                                 true);
     if (result != ESP_OK) {
@@ -490,7 +509,31 @@ esp_err_t aw9523b_enable_box3_power(void)
         return result;
     }
 
-    ESP_LOGI(TAG, "BOX3 power enabled: VBAT_EN=1, VDDA_3V3_EN=1");
+    uint8_t output_levels = 0;
+    result = aw9523b_read_register(AW9523B_REG_OUTPUT_PORT1_0x03,
+                                   &output_levels);
+    if (result != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Failed to verify BOX3 power outputs: %s",
+                 esp_err_to_name(result));
+        return result;
+    }
+
+    const uint8_t enabled_power_mask =
+        (uint8_t)((1U << AW9523B_BOX3_VDD_3V3_ENABLE) |
+                  (1U << AW9523B_BOX3_VBAT_ENABLE) |
+                  (1U << AW9523B_BOX3_VDDA_3V3_ENABLE));
+    if ((output_levels & enabled_power_mask) != enabled_power_mask) {
+        ESP_LOGE(TAG,
+                 "BOX3 power output verification failed: P1=0x%02X",
+                 output_levels);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(AW9523B_BOARD_POWER_STABILIZE_DELAY_MS));
+    ESP_LOGI(TAG,
+             "BOX3 power enabled: P1=0x%02X, VBAT/VDD_3V3/VDDA_3V3=on",
+             output_levels);
     return ESP_OK;
 }
 

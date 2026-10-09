@@ -14,6 +14,15 @@ typedef enum {
 typedef struct {
     const char *test_item;
     const char *back;
+    const char *music;
+    const char *stop;
+    const char *close;
+    const char *music_stopped;
+    const char *music_loading;
+    const char *music_playing;
+    const char *music_error;
+    const char *music_directory_error;
+    const char *music_empty;
 } lvgl_language_texts_t;
 
 /** 获取指定语言的全部 UTF-8 界面文本，无效语言回退为英文。 */

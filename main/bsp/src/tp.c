@@ -275,22 +275,28 @@ static esp_err_t parse_touch_event(const uint8_t *event_data,
          * 高 4 位是原始 Y 高位；event_data[2 + offset] 和 [3 + offset]
          * 分别保存原始 X、Y 坐标的低 8 位。
          */
-        const uint16_t raw_x =
+        uint16_t raw_x =
             ((uint16_t)(event_data[5U + offset] & 0x0FU) << 8) |
             event_data[2U + offset];
-        const uint16_t raw_y =
+        uint16_t raw_y =
             ((uint16_t)(event_data[5U + offset] >> 4) << 8) |
             event_data[3U + offset];
 
         /*
-         * 使用初始化时从芯片读取的 TP 原始 X/Y 分辨率判断坐标是否越界，
-         * 不在事件解析阶段假定触摸面板一定是某个固定分辨率。
+         * CHSC5432 在面板最外沿偶尔会返回恰好等于分辨率的坐标，将这种
+         * 边界值夹到最后一个有效像素；只有真正超过边界的坐标才丢弃。
          */
-        if (raw_x >= tp_x_resolution || raw_y >= tp_y_resolution) {
+        if (raw_x > tp_x_resolution || raw_y > tp_y_resolution) {
             ESP_LOGW(TAG, "Ignore out-of-range point: raw=(%u, %u)",
                      (unsigned)raw_x,
                      (unsigned)raw_y);
             continue;
+        }
+        if (raw_x == tp_x_resolution) {
+            raw_x = (uint16_t)(tp_x_resolution - 1U);
+        }
+        if (raw_y == tp_y_resolution) {
+            raw_y = (uint16_t)(tp_y_resolution - 1U);
         }
 
         /*
@@ -492,6 +498,7 @@ esp_err_t tp_interrupt_process(void)
             ESP_LOGI(TAG, "Touch released");
         }
     } else {
+        #if 1
         /* 当前仍有触摸时，依次输出转换后的 LCD/LVGL 坐标。 */
         for (uint8_t index = 0; index < state.point_count; ++index) {
             ESP_LOGI(TAG, "Point %u/%u: x=%u, y=%u, event=0x%02X",
@@ -501,6 +508,7 @@ esp_err_t tp_interrupt_process(void)
                      (unsigned)state.points[index].y,
                      (unsigned)state.points[index].event);
         }
+        #endif
     }
 
     /* 保存本次触点数量，供下一次中断判断是否刚发生触摸释放。 */

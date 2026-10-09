@@ -4,7 +4,8 @@
 #include "esp_err.h"
 #include "lvgl.h"
 
-#define LVGL_UI_FONT_PATH "/sdcard/font/font.ttf"
+#define LVGL_UI_FONT_FILE_PATH "/sdcard/font/font.ttf"
+#define LVGL_UI_FONT_PATH LVGL_UI_FONT_FILE_PATH
 
 /**
  * @brief 从 SD 卡加载支持多语言 UTF-8 字符的界面 TTF 字体。

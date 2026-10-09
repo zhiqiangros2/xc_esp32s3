@@ -72,12 +72,12 @@ typedef enum {
 esp_err_t aw9523b_init(void);
 
 /**
- * @brief 打开 BOX3 的 VBAT 和模拟 3.3 V 电源。
+ * @brief 打开 BOX3 的 VBAT、数字 3.3 V 和模拟 3.3 V 电源。
  *
- * 调用前必须先执行 aw9523b_init()。函数将 P1_4/VBAT_EN 和
- * P1_5/VDDA_3V3_EN 显式拉高；重复调用安全。
+ * 调用前必须先执行 aw9523b_init()。函数将 P1_4/VBAT_EN、
+ * P1_3/VDD_3V3_EN 和 P1_5/VDDA_3V3_EN 显式拉高；重复调用安全。
  *
- * @return ESP_OK 表示两个电源使能均已拉高；否则返回 I2C 操作错误码。
+ * @return ESP_OK 表示三个电源使能均已拉高；否则返回 I2C 操作错误码。
  */
 esp_err_t aw9523b_enable_box3_power(void);
 
@@ -128,6 +128,13 @@ esp_err_t aw9523b_read_all_inputs(uint16_t *input_levels);
  * aw9523b_init()；on=true 点亮背光，on=false 关闭背光。
  */
 esp_err_t aw9523b_set_box3_lcd_backlight(bool on);
+
+/**
+ * @brief 打开或关闭 BOX3 扬声器功放。
+ *
+ * PA_CTRL 连接 AW9523B P0_5，高电平使能。
+ */
+esp_err_t aw9523b_set_box3_pa_enabled(bool enabled);
 
 /**
  * 控制 BOX3 板载红灯或蓝灯。on=true 点亮，驱动会处理低电平有效逻辑。

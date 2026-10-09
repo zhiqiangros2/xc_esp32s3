@@ -19,10 +19,11 @@
 #define LVGL_DRAW_BUFFER_PIXELS (LCD_X_RESOLUTION * LCD_Y_RESOLUTION)
 
 /*
- * LVGL 主任务需要执行控件布局、绘制、动画和显示刷新，分配 8192 字节栈。
+ * FreeType 灰度光栅器的 gray_convert_glyph() 单个栈帧约为 16.2 KiB，
+ * 再加上 LVGL 绘制和 FreeType 上层调用，需要为主任务保留 32 KiB 栈。
  * ESP-IDF 的 xTaskCreate() 栈大小参数以字节为单位。
  */
-#define LVGL_TASK_STACK_SIZE 8192U
+#define LVGL_TASK_STACK_SIZE (32U * 1024U)
 
 /* LVGL 主任务优先级。数值越大优先级越高，本项目使用优先级 4。 */
 #define LVGL_TASK_PRIORITY 4U
