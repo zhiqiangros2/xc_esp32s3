@@ -196,7 +196,7 @@ esp_err_t camera_test(void)
 
     /*
      * GC0308 帧中每个 RGB565 像素已经是高字节在前。使用专用 LCD 接口
-     * 原样发送，不能调用会按 uint16_t 再交换一次字节的 lcd_draw_pixels()。
+     * 原样发送，避免把已经正确的高低字节顺序再次交换。
      */
     const esp_err_t result = lcd_draw_rgb565_bytes(0,
                                                     0,

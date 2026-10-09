@@ -448,6 +448,14 @@ esp_err_t aw9523b_read_all_inputs(uint16_t *input_levels)
     return result;
 }
 
+esp_err_t aw9523b_set_box3_lcd_backlight(bool on)
+{
+    /* P1 已配置为输出；LCD_BL 为低电平点亮。 */
+    return aw9523b_write_gpio(AW9523B_PORT_1,
+                              AW9523B_BOX3_LCD_BACKLIGHT,
+                              !on);
+}
+
 esp_err_t aw9523b_set_box3_led(aw9523b_p1_pin_t led, bool on)
 {
     if (led != AW9523B_BOX3_LED_RED && led != AW9523B_BOX3_LED_BLUE) {

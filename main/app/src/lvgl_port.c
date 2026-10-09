@@ -432,7 +432,7 @@ esp_err_t lvgl_port_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    /* LVGL 输出和 lcd_draw_pixels() 都使用 RGB565 像素格式。 */
+    /* LVGL 绘制缓冲区使用 RGB565 像素格式。 */
     lv_display_set_color_format(lvgl_display, LV_COLOR_FORMAT_RGB565);
 
     /*

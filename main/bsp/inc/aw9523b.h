@@ -122,6 +122,14 @@ esp_err_t aw9523b_read_gpio(aw9523b_port_t port,
 esp_err_t aw9523b_read_all_inputs(uint16_t *input_levels);
 
 /**
+ * @brief 打开或关闭 BOX3 LCD 背光。
+ *
+ * LCD_BL 连接 AW9523B P1_0，并且低电平点亮。调用前必须完成
+ * aw9523b_init()；on=true 点亮背光，on=false 关闭背光。
+ */
+esp_err_t aw9523b_set_box3_lcd_backlight(bool on);
+
+/**
  * 控制 BOX3 板载红灯或蓝灯。on=true 点亮，驱动会处理低电平有效逻辑。
  */
 esp_err_t aw9523b_set_box3_led(aw9523b_p1_pin_t led, bool on);

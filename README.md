@@ -114,20 +114,21 @@ ESP-IDF 的 `esp_lcd` ST7789 驱动并提供基础绘图接口；`display.c/.h` 
 为 320×240：原点位于左上角，X 轴沿水平方向向右递增，Y 轴沿竖直方向向下
 递增，与 LVGL 默认坐标完全一致。LCD 的 RESX 通过 `ESP_LCD_RESET` 网络与 ESP32-S3 的
 `CHIP_PU` 共用，不能作为独立 GPIO 控制，因此面板驱动使用 ST7789 软件复位；背光
-通过 AW9523B P1_0 控制，并按低电平有效逻辑封装为 `lcd_backlight_set()`。
+通过 AW9523B P1_0 控制，并按低电平有效逻辑封装为
+`aw9523b_set_box3_lcd_backlight()`。
 
-驱动使用 20 行 DMA 暂存区分块刷新，并等待每次异步 SPI 传输完成后才复用缓冲区。
-填充区域必须完全位于屏幕范围内，越界或空区域返回 `ESP_ERR_INVALID_ARG`。
+驱动使用可容纳完整 320×240 RGB565 画面的 PSRAM DMA 缓冲区。填充区域必须
+完全位于屏幕范围内，越界或空区域返回 `ESP_ERR_INVALID_ARG`。
 
 可用接口：
 
 - `lcd_init()`：在已初始化的 SPI2 上初始化 ST7789V2 和背光，重复调用安全。
-- `lcd_backlight_set()`：打开或关闭背光。
 - `lcd_clear()`：使用一个 RGB565 颜色清除整个屏幕。
 - `lcd_fill_rect()`：填充指定矩形区域。
-- `lcd_draw_pixels()`：按从左到右、从上到下的行优先顺序绘制 RGB565 像素。
+- `lcd_draw_rgb565_bytes()`：同步绘制高字节在前的 RGB565 字节流。
+- `lcd_draw_rgb565_bytes_async()`：从 DMA 缓冲区异步绘制 RGB565 字节流。
 - `lcd_show_char()`：显示一个可打印 ASCII 字符。
-- `lcd_show_string()`：在指定矩形区域内显示 ASCII 字符串。
+- `lcd_show_string()`：从指定坐标开始显示并自动换行 ASCII 字符串。
 - `lcd_show_test_pattern()`：显示八色竖向测试条。
 
 ### SD 卡驱动
@@ -181,10 +182,9 @@ CHSC5432 指针输入和 LVGL 处理任务；`lvgl_ui.c/.h` 创建主界面，
 `lvgl_test_page.c/.h` 创建独立测试页面。主界面的 `Test Button` 切换到测试
 页面，测试页面右下角的 `Back` 按钮切换回主界面。
 
-LVGL 使用 20 行、12800 字节的局部绘制缓冲区。刷新回调直接调用
-`lcd_draw_pixels()`，因为两者都采用行优先像素顺序，不需要运行时转置或旋转。
-应用任务如需在 LVGL 任务之外修改界面，必须先调用 `lvgl_port_lock()`，完成后
-调用 `lvgl_port_unlock()`。
+LVGL 使用两个位于 PSRAM 的 320×240 RGB565 全屏绘制缓冲区。刷新回调交换
+RGB565 高低字节后调用 `lcd_draw_rgb565_bytes_async()`，SPI DMA 完成回调再通知
+LVGL 复用当前绘制缓冲区。
 
 ### LittleFS 组件
 

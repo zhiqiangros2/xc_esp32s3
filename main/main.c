@@ -50,6 +50,9 @@ void app_main(void)
     ESP_ERROR_CHECK(aw9523b_init());
     ESP_ERROR_CHECK(aw9523b_enable_box3_power());
 
+    /* LCD 初始化期间关闭背光，避免面板配置完成前显示随机内容。 */
+    ESP_ERROR_CHECK(aw9523b_set_box3_lcd_backlight(false));
+
     /* 分开控制共享复位和 GC0308 2.8 V 电源，保持摄像头处于复位状态上电。 */
     ESP_ERROR_CHECK(aw9523b_set_box3_touch_camera_reset(true));
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -97,6 +100,9 @@ void app_main(void)
 
     /* 基础外设就绪后初始化 320x240 标准横屏坐标的 LCD。 */
     ESP_ERROR_CHECK(lcd_init());
+
+    /* LCD 已清成黑色并开启画面输出，现在点亮背光。 */
+    ESP_ERROR_CHECK(aw9523b_set_box3_lcd_backlight(true));
 
     /* SD 与 LCD 共用 SPI2；SD 挂载失败时只记录警告，不影响其他功能。 */
     esp_err_t sd_result = sd_init();
@@ -184,8 +190,6 @@ void app_main(void)
             /* 在 Y=0 的第一行中，从左向右显示运行时间。 */
             display_result = lcd_show_string(0,
                                              0,
-                                             LCD_X_RESOLUTION,
-                                             16,
                                              16,
                                              uptime_text,
                                              LCD_COLOR_BLACK);
@@ -194,8 +198,6 @@ void app_main(void)
             /* 在 Y=20 的第二行中，从屏幕左侧显示 xc_lcd。 */
             display_result = lcd_show_string(0,
                                              20,
-                                             LCD_X_RESOLUTION,
-                                             16,
                                              16,
                                              "xc_lcd",
                                              LCD_COLOR_BLACK);

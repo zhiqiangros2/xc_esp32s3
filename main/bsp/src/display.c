@@ -193,57 +193,27 @@ esp_err_t lcd_show_char(uint16_t x,
 }
 
 /**
- * @brief 在指定矩形区域内从左到右、从上到下排版并显示 ASCII 字符串。
+ * @brief 从指定坐标开始，从左到右、从上到下显示 ASCII 字符串。
  *
- * @details 函数首先检查文本指针、显示区域、字号和整个字符串。完成预检查
- * 后，character_x/character_y 表示下一个字符左上角的 LCD 坐标：
+ * @details 文本区域从 (x, y) 延伸到屏幕右下角。遇到 '\n' 或右侧空间不足
+ * 时，从起始 X 坐标换到下一行；'\r' 被忽略。屏幕下方放不下完整字符时
+ * 停止并返回 ESP_OK。字符使用透明背景，不会清除未绘制的区域。
  *
- *  - 普通字符绘制成功后，character_x 增加一个字符宽度；
- *  - '\n' 将 character_x 恢复到区域左侧，并让 character_y 增加一行高度；
- *  - '\r' 直接忽略，不改变当前绘制位置；
- *  - 下一个完整字符超过区域右边界时，自动执行一次换行；
- *  - 下一行超过区域下边界时停止，已绘制内容保留并返回 ESP_OK。
- *
- * 每个字符最终由 lcd_show_char() 绘制，因此字模值为 0 的像素不会覆盖
- * 屏幕背景。函数本身不填充背景，也不清除字符串末尾之外的旧内容。
- *
- * 例如 lcd_show_string(0, 20, 320, 16, 16, text, color) 表示在屏幕
- * Y=20~35 的单行区域内，从 X=0 开始用 8x16 字体显示 text。
- *
- * 排版过程可以直接看成下面的文本框：
- *
- *                         LCD X 向右
- *       (x, y) +-----------------------------------+  右边界
- *              | 字符1 字符2 字符3 ...            |
- *              | 字符N ...          <- 换到下一行 |
- *              | ...                               |
- *              +-----------------------------------+
- *                宽度为 x_size；高度为 y_size
- *                              |
- *                              v LCD Y 向下
- *
- * 每个字符先向右排列；右侧空间不足或遇到 '\n' 时，从下一行左侧继续。
- * 下方空间放不下一个完整字符时停止，不会画出半个字符。
- *
- * @param[in] x 文本区域左上角的 LCD X 坐标。
- * @param[in] y 文本区域左上角的 LCD Y 坐标。
- * @param[in] x_size 文本区域宽度。
- * @param[in] y_size 文本区域高度。
+ * @param[in] x 文本起始位置的 LCD X 坐标。
+ * @param[in] y 文本起始位置的 LCD Y 坐标。
  * @param[in] font_height 字体高度，只能为 12、16、24 或 32。
  * @param[in] text 以 '\0' 结尾的字符串。
  * @param[in] font_color RGB565 字体颜色。
- * @return ESP_OK 显示成功或区域已无完整行；参数无效时返回
+ * @return ESP_OK 显示成功或屏幕已无完整行；参数无效时返回
  * ESP_ERR_INVALID_ARG；字符绘制失败时返回 lcd_show_char() 的错误码。
  */
 esp_err_t lcd_show_string(uint16_t x,
                           uint16_t y,
-                          uint16_t x_size,
-                          uint16_t y_size,
                           uint8_t font_height,
                           const char *text,
                           uint16_t font_color)
 {
-    if (text == NULL || !display_region_is_valid(x, y, x_size, y_size)) {
+    if (text == NULL || x >= LCD_X_RESOLUTION || y >= LCD_Y_RESOLUTION) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -251,7 +221,8 @@ esp_err_t lcd_show_string(uint16_t x,
     if (!display_get_ascii_glyph(' ', font_height, &glyph)) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (x_size < glyph.width || y_size < glyph.height) {
+    if (glyph.width > LCD_X_RESOLUTION - x ||
+        glyph.height > LCD_Y_RESOLUTION - y) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -280,8 +251,8 @@ esp_err_t lcd_show_string(uint16_t x,
         }
     }
 
-    const uint32_t text_area_x_end = (uint32_t)x + x_size;
-    const uint32_t text_area_y_end = (uint32_t)y + y_size;
+    const uint32_t text_area_x_end = LCD_X_RESOLUTION;
+    const uint32_t text_area_y_end = LCD_Y_RESOLUTION;
     uint32_t character_x = x;
     uint32_t character_y = y;
 
