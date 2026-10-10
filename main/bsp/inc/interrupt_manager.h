@@ -14,6 +14,7 @@
 /**
  * @brief 初始化 GPIO42 共享低电平中断和处理任务。
  *
+ * 调用前必须已通过 board_gpio_isr_service_init() 安装全局 GPIO ISR 服务。
  * source_flags 指定需要查询的设备。ISR 只发送任务通知；I2C 查询和后续处理
  * 均在普通任务上下文中执行。
  */

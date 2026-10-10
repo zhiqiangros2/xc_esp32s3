@@ -29,6 +29,8 @@ typedef struct {
     lvgl_language_t language;
     const lv_font_t *ui_font;
     bool closing;
+    /* false 表示本次进入页面后尚未开始录音，不显示上一次会话的数据。 */
+    bool session_started;
     audio_recorder_state_t displayed_state;
     uint32_t displayed_seconds;
     char displayed_file[AUDIO_RECORDER_FILE_NAME_MAX];
@@ -79,9 +81,26 @@ static void update_page(record_page_context_t *context)
         }
     }
 
+    /*
+     * audio_recorder 会保留上一段录音的 SAVED 状态和最终秒数，供其他调用者
+     * 查询。新建页面时不应把这段旧时长带进来，所以在本页面第一次成功发送
+     * START 前固定显示 00:00；START 接口会同步把后台秒数清零，此后再显示
+     * 本次会话的实时秒数以及停止后的最终时长。
+     */
+    const uint32_t visible_seconds =
+        context->session_started ? status.elapsed_seconds : 0U;
+    /*
+     * 文件名只在本页面启动的录音成功保存后显示。刚进入页面时，即使后台
+     * 仍保留上一次 SAVED 状态，也必须显示为空；开始下一次录音时同样清空。
+     */
+    const char *visible_file =
+        context->session_started && status.state == AUDIO_RECORDER_SAVED
+            ? status.file_name
+            : "";
+
     if (status.state == context->displayed_state &&
-        status.elapsed_seconds == context->displayed_seconds &&
-        strcmp(status.file_name, context->displayed_file) == 0) {
+        visible_seconds == context->displayed_seconds &&
+        strcmp(visible_file, context->displayed_file) == 0) {
         return;
     }
 
@@ -112,10 +131,9 @@ static void update_page(record_page_context_t *context)
     lv_label_set_text(context->status_label, state_text);
     lv_label_set_text_fmt(context->time_label,
                           "%02" PRIu32 ":%02" PRIu32,
-                          status.elapsed_seconds / 60U,
-                          status.elapsed_seconds % 60U);
-    lv_label_set_text(context->file_label,
-                      status.file_name[0] != '\0' ? status.file_name : "-");
+                          visible_seconds / 60U,
+                          visible_seconds % 60U);
+    lv_label_set_text(context->file_label, visible_file);
 
     const bool active = state_is_active(status.state);
     if (active) {
@@ -131,11 +149,11 @@ static void update_page(record_page_context_t *context)
     }
 
     context->displayed_state = status.state;
-    context->displayed_seconds = status.elapsed_seconds;
+    context->displayed_seconds = visible_seconds;
     snprintf(context->displayed_file,
              sizeof(context->displayed_file),
              "%s",
-             status.file_name);
+             visible_file);
 }
 
 static void status_timer_elapsed(lv_timer_t *timer)
@@ -162,7 +180,12 @@ static void start_button_clicked(lv_event_t *event)
     }
     record_page_context_t *context = lv_event_get_user_data(event);
     if (audio_recorder_start() == ESP_OK) {
-        /* 强制本次事件结束前立即画出 STARTING，而不等待下一个定时周期。 */
+        /*
+         * audio_recorder_start() 在命令入队前已把 elapsed_seconds 清为 0。
+         * 从这一刻开始显示本次会话时长，并在本事件结束前立即画出 00:00
+         * 和 STARTING，不等待下一个 200 ms 定时刷新周期。
+         */
+        context->session_started = true;
         context->displayed_state = (audio_recorder_state_t)-1;
         update_page(context);
     }

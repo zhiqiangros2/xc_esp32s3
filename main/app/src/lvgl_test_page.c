@@ -2,10 +2,12 @@
 
 #include "lvgl_music_page.h"
 #include "lvgl_record_page.h"
+#include "lvgl_wav_manager_page.h"
 
 static lv_obj_t *s_back_label;
 static lv_obj_t *s_music_label;
 static lv_obj_t *s_record_label;
+static lv_obj_t *s_wav_manager_label;
 static lvgl_language_t s_language;
 static const lv_font_t *s_ui_font;
 
@@ -16,7 +18,24 @@ static void test_page_deleted(lv_event_t *event)
         s_back_label = NULL;
         s_music_label = NULL;
         s_record_label = NULL;
+        s_wav_manager_label = NULL;
         s_ui_font = NULL;
+    }
+}
+
+/** 点击时创建 WAV 管理页面；页面创建期间完成目录扫描。 */
+static void wav_manager_button_clicked(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    lv_obj_t *test_page = lv_obj_get_screen(lv_event_get_target(event));
+    lv_obj_t *manager_page = lvgl_wav_manager_page_create(test_page,
+                                                          s_language,
+                                                          s_ui_font);
+    if (manager_page != NULL) {
+        lv_screen_load(manager_page);
     }
 }
 
@@ -98,6 +117,11 @@ void lvgl_test_page_set_language(lvgl_language_t language,
         lv_obj_set_style_text_font(s_record_label, font, 0);
         lv_obj_center(s_record_label);
     }
+    if (s_wav_manager_label != NULL) {
+        lv_label_set_text(s_wav_manager_label, texts->wav_manager);
+        lv_obj_set_style_text_font(s_wav_manager_label, font, 0);
+        lv_obj_center(s_wav_manager_label);
+    }
 }
 
 lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
@@ -158,6 +182,24 @@ lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
                         NULL);
     s_record_label = lv_label_create(record_button);
     lv_obj_set_style_text_color(s_record_label, lv_color_hex(0xFFFFFF), 0);
+
+    /* WAV 管理按钮按需扫描目录，并创建可选择、删除文件的独立页面。 */
+    lv_obj_t *wav_manager_button = lv_button_create(test_page);
+    lv_obj_set_size(wav_manager_button, 112, 44);
+    lv_obj_set_pos(wav_manager_button, 200, 0);
+    lv_obj_set_style_radius(wav_manager_button, 4, 0);
+    lv_obj_set_style_bg_color(wav_manager_button, lv_color_hex(0x1565C0), 0);
+    lv_obj_set_style_bg_color(wav_manager_button,
+                              lv_color_hex(0x0D47A1),
+                              LV_STATE_PRESSED);
+    lv_obj_add_event_cb(wav_manager_button,
+                        wav_manager_button_clicked,
+                        LV_EVENT_CLICKED,
+                        NULL);
+    s_wav_manager_label = lv_label_create(wav_manager_button);
+    lv_obj_set_style_text_color(s_wav_manager_label,
+                                lv_color_hex(0xFFFFFF),
+                                0);
 
     /* 返回按钮紧贴测试页面右下角，文字在按钮内部保持居中。 */
     lv_obj_t *back_button = lv_button_create(test_page);

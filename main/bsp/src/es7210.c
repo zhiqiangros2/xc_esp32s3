@@ -6,6 +6,23 @@
  * 的共享 I2C 接口重新实现。与参考代码相比，本驱动会检查全部参数和每次
  * I2C 操作；通信失败最多尝试 3 次，不会无限阻塞录音任务。
  *
+ * 从 ES7210 一侧观察，数字音频和模拟输入关系如下：
+ *
+ *   ESP32 GPIO21 MCLK  --------------------------> MCLK       时钟输入
+ *   ESP32 GPIO38 BCLK  --------------------------> SCLK       时钟输入
+ *   ESP32 GPIO39 LRCK  --------------------------> LRCK       帧同步输入
+ *   ESP32 GPIO41 DIN   <--[MIC1,MIC3,MIC2,MIC4]-- SDOUT1     TDM 输出
+ *   ESP32 GPIO40 DOUT  ---> ES8311，与 ES7210 无数字数据连接
+ *
+ *   环境麦克风 ----------------------------------> MIC1
+ *   接地/未使用 ---------------------------------> MIC2
+ *   ES8311 OUTP/OUTN 模拟播放信号 --------------> MIC3       AEC 参考
+ *   接地/未使用 ---------------------------------> MIC4
+ *
+ * 四路 ADC 并不各占一根 ESP32 数据线。ES7210 把四个 16 bit 样本按 TDM
+ * 时隙顺序复用到唯一的 SDOUT1 上，ESP32 再由 GPIO41 和 RX DMA 还原为四个
+ * 连续槽。MCLK/BCLK/LRCK 与 ES8311 共用，但 SDOUT1 是独立的单向录音线。
+ *
  * ES7210 是本项目真正的四通道 TDM 器件。它工作在 I2S 从机模式，由
  * ESP32-S3 I2S0 提供 MCLK、BCLK 和 WS/LRCK，四路 ADC 数据经 GPIO41
  *（SDOUT1/TDMOUT）返回 ESP32-S3。默认的 16 bit、1xFS Philips I2S-TDM
@@ -20,8 +37,8 @@
  * 则从同一原始帧提取 MIC1+MIC3。驱动保持四路原始槽顺序，不在 Codec 层
  * 重排通道。
  *
- * 48 kHz、16 bit、四槽时，LRCK=48 kHz，BCLK=64fs=3.072 MHz；默认
- * MCLK=256fs=12.288 MHz。MCLK/BCLK/WS 与 ES8311 共用，但录音数据线独立，
+ * 16 kHz、16 bit、四槽时，LRCK=16 kHz，BCLK=64fs=1.024 MHz；默认
+ * MCLK=256fs=4.096 MHz。MCLK/BCLK/WS 与 ES8311 共用，但录音数据线独立，
  * 因而 ES7210 采集可与 ES8311 播放同时工作。
  */
 #include "es7210.h"
@@ -30,6 +47,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "audio_i2s.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -90,10 +108,10 @@
 /* 同时作为失败重试间隔和连续寄存器写入后的稳定时间。 */
 #define ES7210_I2C_DELAY_MS 10U
 
-/* 板级默认录音参数必须与 audio_i2s.c 的启动时钟配置保持一致。 */
-#define ES7210_DEFAULT_SAMPLE_RATE_HZ 48000U /* WS/LRCK = 48 kHz。 */
-#define ES7210_DEFAULT_MCLK_RATIO 256U       /* MCLK = 48 kHz x 256。 */
-#define ES7210_DEFAULT_MIC_GAIN ES7210_MIC_GAIN_24_DB /* 麦克风模拟增益。 */
+/* 板级默认录音参数直接复用公共 I2S 采样率，防止播放、录音配置不一致。 */
+#define ES7210_DEFAULT_SAMPLE_RATE_HZ AUDIO_I2S_SAMPLE_RATE_HZ
+#define ES7210_DEFAULT_MCLK_RATIO 256U /* 16 kHz 时 MCLK=4.096 MHz。 */
+#define ES7210_DEFAULT_MIC_GAIN ES7210_MIC_GAIN_27_DB /* 麦克风模拟增益。 */
 #define ES7210_DEFAULT_VOLUME_DB 0                    /* ADC 数字增益保持 0 dB。 */
 
 /* MIC 增益寄存器高位为参考程序要求的固定控制位，低位保存增益枚举。 */
@@ -868,7 +886,7 @@ esp_err_t es7210_config_volume(int8_t volume_db)
  * 完整流程：
  * 1. 已初始化则直接返回，保证接口可重复调用；
  * 2. 在固定地址 0x40 探测器件，再加入板级共享 I2C0 总线；
- * 3. 配置 48 kHz、16 bit、1xFS 四槽 Philips I2S-TDM、MICBIAS 和增益；
+ * 3. 配置 16 kHz、16 bit、1xFS 四槽 Philips I2S-TDM、MICBIAS 和增益；
  * 4. 把四路 ADC 数字音量设置为 0 dB，避免数字增益导致采样削顶；
  * 5. 任一步失败都移除本驱动创建的设备句柄，使后续调用可重新开始。
  *
@@ -907,19 +925,19 @@ esp_err_t es7210_init(void)
     }
 
     /*
-     * 与 audio_i2s.c 的 48 kHz、16 bit、四槽 Philips TDM 配套。启用寄存器
+     * 与 audio_i2s.c 的 16 kHz、16 bit、四槽 Philips TDM 配套。启用寄存器
      * 0x12 的 1xFS I2S-TDM 后，板上 GPIO41 连接的 SDOUT1/TDMOUT 在每个
      * LRCK 周期依次输出 [MIC1,MIC3,MIC2,MIC4]：槽 0/1 位于 LRCK 低半周，
      * 槽 2/3 位于高半周。录音任务从槽 0/2 保存 MIC1+MIC2 WAV，同时从槽
      * 0/1 提取同步的 MIC1+MIC3 供 AEC 使用。
      */
     static const es7210_codec_config_t default_config = {
-        .sample_rate_hz = ES7210_DEFAULT_SAMPLE_RATE_HZ, /* 48 kHz。 */
-        .mclk_ratio = ES7210_DEFAULT_MCLK_RATIO,         /* MCLK=12.288 MHz。 */
+        .sample_rate_hz = ES7210_DEFAULT_SAMPLE_RATE_HZ, /* 16 kHz。 */
+        .mclk_ratio = ES7210_DEFAULT_MCLK_RATIO,         /* MCLK=4.096 MHz。 */
         .i2s_format = ES7210_I2S_FMT_I2S,                /* Philips I2S。 */
         .bit_width = ES7210_I2S_BITS_16,                 /* 每采样 16 bit。 */
         .mic_bias = ES7210_MIC_BIAS_2V87,                /* 最大 MICBIAS。 */
-        .mic_gain = ES7210_DEFAULT_MIC_GAIN,             /* 预留削顶余量。 */
+        .mic_gain = ES7210_DEFAULT_MIC_GAIN,             /* 27 dB，适度提高录音电平。 */
         .tdm_enabled = true,                             /* SDOUT1 输出全部四路 ADC。 */
     };
 

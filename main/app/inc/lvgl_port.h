@@ -15,7 +15,9 @@ esp_err_t lvgl_port_init(void);
 /**
  * @brief 启动统一处理界面刷新和触摸输入的 LVGL 任务。
  *
- * 必须在 lvgl_port_init() 和首屏界面创建完成后调用。函数允许重复调用。
+ * 必须在 lvgl_port_init() 和首屏界面创建完成后调用。任务使用链接期预留的
+ * 32 KiB 片内静态栈，确保 FreeType 读取 SD 字体时 SDSPI 的局部控制数据可被
+ * SPI DMA 直接访问；两个全屏绘制缓冲仍位于 PSRAM。函数允许重复调用。
  */
 esp_err_t lvgl_port_start(void);
 

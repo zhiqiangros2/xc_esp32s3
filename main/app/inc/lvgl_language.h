@@ -31,6 +31,12 @@ typedef struct {
     const char *record_stopping;
     const char *record_saved;
     const char *record_error;
+    const char *wav_manager;
+    const char *wav_delete;
+    const char *wav_select_file;
+    const char *wav_selected;
+    const char *wav_delete_success;
+    const char *wav_delete_error;
 } lvgl_language_texts_t;
 
 /** 获取指定语言的全部 UTF-8 界面文本，无效语言回退为英文。 */

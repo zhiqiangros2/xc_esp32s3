@@ -38,15 +38,20 @@
  *   -> SD 重填 buffer1，同时播放 buffer2 -> 释放 buffer2 -> 继续交替。
  * 没有消息时两个任务都阻塞，不进行固定周期轮询，也不使用 Queue Set。
  *
- * 当前支持格式：RIFF/WAVE、PCM、16 bit、双声道。采样率可由文件指定，
- * 但 byte_rate 必须等于 sample_rate x 4，block_align 必须为 4。
+ * 当前支持格式固定为 RIFF/WAVE、PCM、16 kHz、16 bit、双声道；
+ * byte_rate 必须为 16000 x 4 = 64000，block_align 必须为 4。固定采样率
+ * 保证播放不会改变录音和语音识别正在使用的公共 I2S 时钟。
  */
 #include "wav_player.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "audio_i2s.h"
 #include "es8311.h"
@@ -61,37 +66,37 @@
 /*
  * 两个 PSRAM 缓冲区在 wav_player_init() 中分别独立分配，每个 256 KiB，
  * 总容量为 512 KiB。它们在播放器整个运行期内重复使用，切歌时不重新申请。
- * 以 48 kHz / 16 bit / 双声道为例：
+ * 以固定的 16 kHz / 16 bit / 双声道计算：
  *   单缓冲容量   = 256 KiB = 256 x 1024 = 262144 字节；
  *   每帧字节数   = 16 bit / 8 x 2 声道 = 4 字节；
- *   每秒数据量   = 48000 帧 x 4 字节 = 192000 字节；
- *   单缓冲时长   = 262144 / 192000 = 1.3653 秒；
- *   双缓冲总时长 = 2 x 1.3653 = 2.7306 秒。
- * DMA 任务播放 buffer1 的约 1.36 秒期间，SD 任务填充 buffer2；随后交换，
+ *   每秒数据量   = 16000 帧 x 4 字节 = 64000 字节；
+ *   单缓冲时长   = 262144 / 64000 = 4.096 秒；
+ *   双缓冲总时长 = 2 x 4.096 = 8.192 秒。
+ * DMA 任务播放 buffer1 的约 4.10 秒期间，SD 任务填充 buffer2；随后交换，
  * DMA 任务播放 buffer2 的同时，SD 任务重新填充 buffer1。
  */
 #define WAV_PLAYER_BUFFER1_SIZE (256U * 1024U)
 #define WAV_PLAYER_BUFFER2_SIZE (256U * 1024U)
 #define WAV_PLAYER_BUFFER_COUNT 2U
 /*
- * 每次提交给 I2S 驱动的数据量。48 kHz 下：
- *   单次写入时长 = 4096 / 192000 = 0.02133 秒，约 21.3 ms；
+ * 每次提交给 I2S 驱动的数据量。16 kHz 下：
+ *   单次写入时长 = 4096 / 64000 = 0.064 秒，即 64 ms；
  *   每个 256 KiB 缓冲需要 262144 / 4096 = 64 次 I2S 写入。
  * DMA 写任务每次写入前检查一次 STOP 控制，因此停止不必等待整个缓冲约
- * 1.36 秒。SD 任务收到 UI 命令后把 STOP 转发给 DMA 写任务；若当时正在
- * fread()，还需等待本次 SD 读取返回。已经进入 DMA 的音频最多约 128 ms。
+ * 4.10 秒。SD 任务收到 UI 命令后把 STOP 转发给 DMA 写任务；若当时正在
+ * read()，还需等待本次 SD 读取返回。已经进入 DMA 的音频最多约 383 ms。
  */
 #define WAV_PLAYER_I2S_WRITE_SIZE 4096U
 /* SD 读取/控制任务的静态栈大小（ESP-IDF 的栈单位在本目标上为字节）。 */
 #define WAV_PLAYER_READER_TASK_STACK_DEPTH 8192U
-/* SD 任务与 LVGL 同级；耗时 fread() 不应抢占更实时的 DMA 写任务。 */
+/* SD 任务与 LVGL 同级；耗时 read() 不应抢占更实时的 DMA 写任务。 */
 #define WAV_PLAYER_READER_TASK_PRIORITY 4
 /* DMA 写任务只保存小量状态，4 KiB 静态栈足够。 */
 #define WAV_PLAYER_WRITER_TASK_STACK_DEPTH 4096U
 /* DMA 写任务优先于 SD 和 LVGL，确保 I2S 持续获得 PCM 数据。 */
 #define WAV_PLAYER_WRITER_TASK_PRIORITY 5
 /*
- * 单次 I2S 写入等待 DMA 空间的最长时间。正常写入约需 21.3 ms，100 ms 用于
+ * 单次 I2S 写入等待 DMA 空间的最长时间。正常写入约需 64 ms，100 ms 用于
  * 覆盖短时调度抖动；超时返回时仍按 bytes_written 处理已经写入的部分。
  */
 #define WAV_PLAYER_I2S_TIMEOUT_MS 100
@@ -249,6 +254,39 @@ static uint32_t read_le32(const uint8_t *data)
 }
 
 /**
+ * @brief 从文件描述符连续读取指定字节数。
+ *
+ * POSIX read() 允许成功返回少于请求长度的数据，因此 WAV 头和 PCM 缓冲都要
+ * 循环读取，直到目标区域填满、遇到 EOF 或真正的 I/O 错误。EINTR 只表示调用
+ * 被信号打断，可直接重试。该接口不使用 Newlib FILE，也不会在播放时为 stdio
+ * 流动态创建递归锁。
+ */
+static esp_err_t read_file_exact(int file_descriptor,
+                                 void *buffer,
+                                 size_t size)
+{
+    uint8_t *destination = buffer;
+    size_t total_read = 0;
+
+    while (total_read < size) {
+        const ssize_t read_result = read(file_descriptor,
+                                         destination + total_read,
+                                         size - total_read);
+        if (read_result > 0) {
+            total_read += (size_t)read_result;
+            continue;
+        }
+        if (read_result == 0) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        if (errno != EINTR) {
+            return ESP_FAIL;
+        }
+    }
+    return ESP_OK;
+}
+
+/**
  * @brief 发布新的播放器状态快照。
  *
  * 对外状态只保存文件名，不保存完整路径，避免 UI 状态结构过大。先在栈上构造
@@ -285,17 +323,19 @@ static void set_status(wav_player_state_t state,
  * 会跳过 LIST、JUNK 等扩展块，并处理 RIFF 对奇数字节块增加的对齐字节。
  * fmt 与 data 不要求固定先后位置；两个块都找到后回到记录的 data 偏移。
  *
- * @param file 已以二进制只读方式打开的文件。
+ * @param file_descriptor 已以 O_RDONLY 打开的 POSIX 文件描述符。
  * @param format 返回解析并校验后的 PCM 格式。
  * @return ESP_OK 表示支持播放；否则表示文件截断、结构错误或格式不支持。
  */
-static esp_err_t parse_wav(FILE *file, wav_format_t *format)
+static esp_err_t parse_wav(int file_descriptor, wav_format_t *format)
 {
     /* RIFF 固定头为："RIFF"、文件长度、"WAVE"，共 12 字节。 */
     uint8_t riff_header[12];
-    if (fread(riff_header, 1, sizeof(riff_header), file) !=
-        sizeof(riff_header)) {
-        return ESP_ERR_INVALID_SIZE;
+    esp_err_t result = read_file_exact(file_descriptor,
+                                       riff_header,
+                                       sizeof(riff_header));
+    if (result != ESP_OK) {
+        return result;
     }
     if (memcmp(riff_header, "RIFF", 4) != 0 ||
         memcmp(riff_header + 8, "WAVE", 4) != 0) {
@@ -303,30 +343,36 @@ static esp_err_t parse_wav(FILE *file, wav_format_t *format)
     }
 
     bool format_found = false;
-    long data_offset = -1;
+    off_t data_offset = (off_t)-1;
     memset(format, 0, sizeof(*format));
 
     /* 每个子块以 4 字节 ID 和 4 字节小端长度开始。 */
     while (true) {
         uint8_t chunk_header[8];
-        if (fread(chunk_header, 1, sizeof(chunk_header), file) !=
-            sizeof(chunk_header)) {
-            return ESP_ERR_NOT_FOUND;
+        result = read_file_exact(file_descriptor,
+                                 chunk_header,
+                                 sizeof(chunk_header));
+        if (result != ESP_OK) {
+            return result;
         }
 
         const uint32_t chunk_size = read_le32(chunk_header + 4);
-        const long chunk_data_offset = ftell(file);
-        if (chunk_data_offset < 0) {
+        const off_t chunk_data_offset = lseek(file_descriptor, 0, SEEK_CUR);
+        if (chunk_data_offset == (off_t)-1) {
             return ESP_FAIL;
         }
 
         if (memcmp(chunk_header, "fmt ", 4) == 0) {
-            /* PCM 基础 fmt 内容为 16 字节；更长的扩展内容由后续 fseek 跳过。 */
+            /* PCM 基础 fmt 内容为 16 字节；更长的扩展内容由后续 lseek 跳过。 */
             uint8_t format_data[16];
-            if (chunk_size < sizeof(format_data) ||
-                fread(format_data, 1, sizeof(format_data), file) !=
-                    sizeof(format_data)) {
+            if (chunk_size < sizeof(format_data)) {
                 return ESP_ERR_INVALID_SIZE;
+            }
+            result = read_file_exact(file_descriptor,
+                                     format_data,
+                                     sizeof(format_data));
+            if (result != ESP_OK) {
+                return result;
             }
 
             format->audio_format = read_le16(format_data);
@@ -342,8 +388,8 @@ static esp_err_t parse_wav(FILE *file, wav_format_t *format)
             format->data_size = chunk_size;
         }
 
-        if (format_found && data_offset >= 0) {
-            if (fseek(file, data_offset, SEEK_SET) != 0) {
+        if (format_found && data_offset != (off_t)-1) {
+            if (lseek(file_descriptor, data_offset, SEEK_SET) == (off_t)-1) {
                 return ESP_FAIL;
             }
             break;
@@ -351,16 +397,21 @@ static esp_err_t parse_wav(FILE *file, wav_format_t *format)
 
         /* RIFF 子块从偶数字节边界开始，奇数长度块后带一个填充字节。 */
         const uint32_t aligned_size = chunk_size + (chunk_size & 1U);
-        if (fseek(file, chunk_data_offset + (long)aligned_size, SEEK_SET) != 0) {
+        if (lseek(file_descriptor,
+                  chunk_data_offset + (off_t)aligned_size,
+                  SEEK_SET) == (off_t)-1) {
             return ESP_FAIL;
         }
     }
 
-    /* I2S 层固定为 16 bit 双声道，因此在开始播放前拒绝其他格式。 */
+    /*
+     * 整条音频链固定为 16 kHz、16 bit 双声道。尤其要在这里拒绝其他采样率，
+     * 避免播放器尝试改变常驻 16 kHz RX、ES7210 和 ESP-SR 共用的时钟。
+     */
     if (format->audio_format != 1 ||
         format->channels != 2 ||
         format->bits_per_sample != 16 ||
-        format->sample_rate_hz == 0 ||
+        format->sample_rate_hz != AUDIO_I2S_SAMPLE_RATE_HZ ||
         format->block_alignment != 4 ||
         format->byte_rate != format->sample_rate_hz * 4U) {
         return ESP_ERR_NOT_SUPPORTED;
@@ -371,8 +422,8 @@ static esp_err_t parse_wav(FILE *file, wav_format_t *format)
 /**
  * @brief 确保 I2S 时钟和 ES8311 已准备好接收当前采样率的 PCM。
  *
- * I2S 通道已由 main.c 创建，这里只把时钟切换到当前 WAV 采样率。随后确认
- * ES8311 已初始化；功放使能同样由 main.c 的板级启动流程管理。
+ * I2S 通道已由 main.c 以固定 16 kHz 创建；这里验证文件采样率并登记播放，
+ * 不改变公共时钟。随后确认 ES8311 已初始化；功放使能由 main.c 管理。
  */
 static esp_err_t start_audio_output(uint32_t sample_rate_hz)
 {
@@ -609,7 +660,7 @@ static void audio_writer_task(void *argument)
         }
 
         /*
-         * 先归还刚写完的索引，使读任务可以尽早执行下一次 fread()。若这是末块，
+         * 先归还刚写完的索引，使读任务可以尽早执行下一次 read()。若这是末块，
          * 随后的 FINISHED 表示文件数据已全部提交给 DMA，不表示 Codec 被关闭。
          */
         send_reader_message(READER_MESSAGE_BUFFER_RELEASED,
@@ -628,7 +679,7 @@ static void audio_writer_task(void *argument)
  *
  * 若 buffer2 已经在队列中，普通 SendToBack 会让写任务先播放完整个 buffer2，
  * 最坏增加约 1.36 秒停止延迟。SendToFront 让 STOP 在下一个 4096 字节边界被
- * 检查到，停止响应主要由一次 I2S 写入和当前 fread() 的耗时决定。
+ * 检查到，停止响应主要由一次 I2S 写入和当前 read() 的耗时决定。
  */
 static esp_err_t request_writer_stop(void)
 {
@@ -643,20 +694,21 @@ static esp_err_t request_writer_stop(void)
 /**
  * @brief 从 WAV data 区读取下一段 PCM 到指定缓冲。
  *
- * @param file 已定位在 WAV data 区当前读取位置的文件。
+ * @param file_descriptor 已定位在 WAV data 区当前读取位置的文件描述符。
  * @param remaining_data_size 输入剩余字节数，成功后减去本次读取量。
  * @param buffer_index 0 选择 buffer1，1 选择 buffer2。
  * @param block 返回给写任务使用的索引、有效长度和末块标志。
  *
- * 本函数只执行 fread() 并生成描述符，不发送消息。调用者发送 BUFFER_READY
- * 后，才真正把该缓冲的所有权交给写任务。
+ * 目标缓冲位于 PSRAM。sd_fatfs.c 已在 SD host 中注册固定的 4 KiB 片内 DMA
+ * 缓冲，底层会自动把这次大读取拆块并中转，不会在运行期申请临时 DMA 内存。
+ * 调用者发送 BUFFER_READY 后，才真正把该缓冲的所有权交给写任务。
  */
-static esp_err_t fill_audio_buffer(FILE *file,
+static esp_err_t fill_audio_buffer(int file_descriptor,
                                    uint32_t *remaining_data_size,
                                    uint8_t buffer_index,
                                    wav_buffer_block_t *block)
 {
-    if (file == NULL || remaining_data_size == NULL || block == NULL ||
+    if (file_descriptor < 0 || remaining_data_size == NULL || block == NULL ||
         buffer_index >= WAV_PLAYER_BUFFER_COUNT ||
         *remaining_data_size == 0) {
         return ESP_ERR_INVALID_ARG;
@@ -668,24 +720,23 @@ static esp_err_t fill_audio_buffer(FILE *file,
         *remaining_data_size < capacity
             ? *remaining_data_size
             : capacity;
-    const size_t bytes_read = fread(get_audio_buffer(buffer_index),
-                                    1,
-                                    read_size,
-                                    file);
-    if (bytes_read != read_size) {
-        return feof(file) ? ESP_ERR_INVALID_SIZE : ESP_FAIL;
+    const esp_err_t result = read_file_exact(file_descriptor,
+                                             get_audio_buffer(buffer_index),
+                                             read_size);
+    if (result != ESP_OK) {
+        return result;
     }
 
-    *remaining_data_size -= (uint32_t)bytes_read;
+    *remaining_data_size -= (uint32_t)read_size;
     *block = (wav_buffer_block_t){
         .index = buffer_index,
-        .data_size = bytes_read,
+        .data_size = read_size,
         .is_last = *remaining_data_size == 0,
     };
     ESP_LOGD(TAG,
              "SD filled buffer%u: %u bytes%s",
              (unsigned)buffer_index + 1U,
-             (unsigned)bytes_read,
+             (unsigned)read_size,
              block->is_last ? ", last" : "");
     return ESP_OK;
 }
@@ -716,26 +767,26 @@ static esp_err_t send_buffer_ready(const wav_buffer_block_t *block)
  * 两个缓冲。写任务队列中的顺序固定为 START、buffer1、buffer2。
  *
  * @param path 要播放的绝对路径。
- * @param source_file 若预读后仍有数据，返回保持打开的 FILE；否则返回 NULL。
+ * @param source_descriptor 若预读后仍有数据，返回打开的描述符；否则返回 -1。
  * @param remaining_data_size 返回尚未读入双缓冲的 PCM 字节数。
  * @param writer_started START 成功入队后置 true，供调用者在后续失败时发 STOP。
  */
 static esp_err_t prepare_playback(const char *path,
-                                  FILE **source_file,
+                                  int *source_descriptor,
                                   uint32_t *remaining_data_size,
                                   bool *writer_started)
 {
-    *source_file = NULL;
+    *source_descriptor = -1;
     *remaining_data_size = 0;
     *writer_started = false;
 
-    FILE *file = fopen(path, "rb");
-    if (file == NULL) {
-        return ESP_ERR_NOT_FOUND;
+    const int file_descriptor = open(path, O_RDONLY);
+    if (file_descriptor < 0) {
+        return errno == ENOENT ? ESP_ERR_NOT_FOUND : ESP_FAIL;
     }
 
     wav_format_t format = {0};
-    esp_err_t result = parse_wav(file, &format);
+    esp_err_t result = parse_wav(file_descriptor, &format);
     if (result == ESP_OK && format.data_size == 0) {
         result = ESP_ERR_INVALID_SIZE;
     }
@@ -750,7 +801,7 @@ static esp_err_t prepare_playback(const char *path,
     while (result == ESP_OK &&
            initial_block_count < WAV_PLAYER_BUFFER_COUNT &&
            remaining > 0) {
-        result = fill_audio_buffer(file,
+        result = fill_audio_buffer(file_descriptor,
                                    &remaining,
                                    (uint8_t)initial_block_count,
                                    &initial_blocks[initial_block_count]);
@@ -780,7 +831,7 @@ static esp_err_t prepare_playback(const char *path,
     }
 
     if (result != ESP_OK) {
-        fclose(file);
+        close(file_descriptor);
         return result;
     }
 
@@ -791,9 +842,9 @@ static esp_err_t prepare_playback(const char *path,
              format.data_size);
     *remaining_data_size = remaining;
     if (remaining > 0) {
-        *source_file = file;
+        *source_descriptor = file_descriptor;
     } else {
-        fclose(file);
+        close(file_descriptor);
     }
     return ESP_OK;
 }
@@ -826,11 +877,11 @@ static void wav_reader_task(void *argument)
     (void)argument;
 
     /*
-     * file 只由本任务访问。预读完全部文件后会提前关闭；此时写任务仍可继续
+     * file_descriptor 只由本任务访问。预读完全部文件后会提前关闭；写任务仍可
      * 播放已经位于 PSRAM 中的最后一个或两个缓冲。
      */
-    FILE *file = NULL;
-    /* WAV data 区中尚未通过 fread() 读入 PSRAM 的字节数。 */
+    int file_descriptor = -1;
+    /* WAV data 区中尚未通过 read() 读入 PSRAM 的字节数。 */
     uint32_t remaining_data_size = 0;
     /*
      * writer_active 是读任务对写任务状态的本地记录：START 入队后置 true，
@@ -862,9 +913,9 @@ static void wav_reader_task(void *argument)
                  * 新 PLAY 会替换尚未执行的旧 PLAY。先停止继续读取旧文件；若
                  * 写任务仍持有缓冲，循环后半段会发 STOP 并等待安全确认。
                  */
-                if (file != NULL) {
-                    fclose(file);
-                    file = NULL;
+                if (file_descriptor >= 0) {
+                    close(file_descriptor);
+                    file_descriptor = -1;
                 }
                 remaining_data_size = 0;
                 pending_action = READER_PENDING_PLAY;
@@ -880,9 +931,9 @@ static void wav_reader_task(void *argument)
                  * STOP 不直接在 UI 上下文关闭文件。读任务收到消息后关闭 SD
                  * 文件，并把待执行动作改成 STOP；当前 DMA 写入由写任务结束。
                  */
-                if (file != NULL) {
-                    fclose(file);
-                    file = NULL;
+                if (file_descriptor >= 0) {
+                    close(file_descriptor);
+                    file_descriptor = -1;
                 }
                 remaining_data_size = 0;
                 pending_action = READER_PENDING_STOP;
@@ -894,11 +945,11 @@ static void wav_reader_task(void *argument)
                  * index 指明刚播放完成的是 buffer1 还是 buffer2。只重填这一块，
                  * 另一块仍归写任务所有并继续输出，两个任务因此可以并行工作。
                  */
-                if (file != NULL && remaining_data_size > 0 &&
+                if (file_descriptor >= 0 && remaining_data_size > 0 &&
                     !waiting_for_stop) {
                     wav_buffer_block_t block;
                     esp_err_t result =
-                        fill_audio_buffer(file,
+                        fill_audio_buffer(file_descriptor,
                                           &remaining_data_size,
                                           message.data.buffer_index,
                                           &block);
@@ -906,8 +957,8 @@ static void wav_reader_task(void *argument)
                         result = send_buffer_ready(&block);
                     }
                     if (result != ESP_OK) {
-                        fclose(file);
-                        file = NULL;
+                        close(file_descriptor);
+                        file_descriptor = -1;
                         remaining_data_size = 0;
                         pending_action = READER_PENDING_ERROR;
                         ESP_LOGE(TAG,
@@ -919,8 +970,8 @@ static void wav_reader_task(void *argument)
                                    current_path);
                     } else if (remaining_data_size == 0) {
                         /* 最后一块已移交；关闭文件并等待 FINISHED。 */
-                        fclose(file);
-                        file = NULL;
+                        close(file_descriptor);
+                        file_descriptor = -1;
                     }
                 }
                 break;
@@ -940,9 +991,9 @@ static void wav_reader_task(void *argument)
                  * 请求切歌/停止，则保留 pending_action，继续等待 STOPPED 回执。
                  */
                 writer_active = false;
-                if (file != NULL) {
-                    fclose(file);
-                    file = NULL;
+                if (file_descriptor >= 0) {
+                    close(file_descriptor);
+                    file_descriptor = -1;
                 }
                 remaining_data_size = 0;
                 if (!waiting_for_stop &&
@@ -957,9 +1008,9 @@ static void wav_reader_task(void *argument)
                  * 队列中的 STOP 随后仍会产生 STOPPED，并执行原来的待定动作。
                  */
                 writer_active = false;
-                if (file != NULL) {
-                    fclose(file);
-                    file = NULL;
+                if (file_descriptor >= 0) {
+                    close(file_descriptor);
+                    file_descriptor = -1;
                 }
                 remaining_data_size = 0;
                 if (!waiting_for_stop) {
@@ -1013,7 +1064,7 @@ static void wav_reader_task(void *argument)
             bool writer_started = false;
             const esp_err_t result =
                 prepare_playback(current_path,
-                                 &file,
+                                 &file_descriptor,
                                  &remaining_data_size,
                                  &writer_started);
             writer_active = writer_started;
@@ -1056,8 +1107,8 @@ static void wav_reader_task(void *argument)
  * @brief 分配双缓冲、两个静态队列并创建 SD/DMA 两个后台任务。
  *
  * 函数可重复调用。读任务和写任务各有一个静态收件队列；buffer1 和 buffer2
- * 从 PSRAM 分配一次，后续所有 PLAY 共用。这里只准备资源，不打开文件，也
- * 不改变 I2S/Codec 状态。
+ * 从 PSRAM 分配一次，后续所有 PLAY 共用。SD 所需的片内 DMA 中转区由
+ * sd_fatfs.c 在挂载时统一管理。这里只准备播放器资源，不改变 I2S/Codec 状态。
  *
  * 初始化顺序：
  * 1. 创建 reader/writer 两个静态队列；
@@ -1107,7 +1158,7 @@ esp_err_t wav_player_init(void)
         return ESP_ERR_NO_MEM;
     }
     s_buffer2 = heap_caps_malloc(WAV_PLAYER_BUFFER2_SIZE,
-                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_buffer2 == NULL) {
         heap_caps_free(s_buffer1);
         s_buffer1 = NULL;

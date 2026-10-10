@@ -5,6 +5,11 @@
  * @file es7210.h
  * @brief BOX3 板载 ES7210 四通道麦克风 ADC 的公开配置接口。
  *
+ * 数字音频连接为三根共享时钟输入加一根 TDM 数据输出：GPIO21/MCLK、
+ * GPIO38/BCLK、GPIO39/LRCK 由 ESP32-S3 同时送给 ES7210 和 ES8311；ES7210
+ * 把四路 ADC 复用到 SDOUT1，再经 GPIO41/DIN 返回 ESP32-S3。播放数据使用
+ * 独立的 GPIO40 从 ESP32 发往 ES8311，不经过 ES7210。
+ *
  * ES7210 由 I2C0 配置，是共享音频总线上真正的四通道 TDM 器件。它工作
  * 在 I2S 从机模式；ESP32-S3 I2S0 提供 MCLK、BCLK 和 WS，并从 DIN 接收
  * 16 bit 1xFS TDM 帧 [MIC1,MIC3,MIC2,MIC4]。MIC1 是环境麦克风，MIC3
@@ -115,9 +120,9 @@ typedef struct {
  * 完整执行固定地址探测、添加 I2C 设备、八阶段 Codec 配置、关键寄存器
  * 回读以及数字音量设置。默认参数为：
  *
- * - 48 kHz、256fs MCLK；
+ * - 16 kHz、256fs MCLK（4.096 MHz）；
  * - 16 bit、1xFS 四槽 Philips I2S-TDM，槽顺序 MIC1/MIC3/MIC2/MIC4；
- * - 2.87 V MICBIAS、24 dB PGA 模拟增益；
+ * - 2.87 V MICBIAS、27 dB PGA 模拟增益；
  * - 0 dB ADC 数字增益，为语音峰值保留削顶余量。
  *
  * 函数可重复调用，初始化成功后再次调用会直接返回。首次调用前必须已经

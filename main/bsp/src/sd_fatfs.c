@@ -21,10 +21,24 @@
 #define SD_FATFS_TEST_CONTENT "Hello SD FATFS from BOX3!\n"
 #define SD_FATFS_TEST_BUFFER_SIZE 64U
 #define SD_FATFS_BYTES_PER_MIB (1024U * 1024U)
+/*
+ * SD 卡物理扇区为 512 字节。FreeType 的字形缓存和播放器的大缓冲位于 PSRAM，
+ * 不能直接作为 SDSPI DMA 目标；ESP-IDF 默认会在每次这种访问时临时申请最多
+ * 16 个扇区，即 16 x 512 = 8192 字节的片内 DMA 缓冲。AFE、I2S 和 LVGL
+ * 启动后片内 DMA 堆可能已经没有足够连续空间，渲染新的中文字符时就会出现：
+ *   allocate_dma_buf: not enough mem
+ *
+ * 挂载前固定预留 4096 字节并填写 host.dma_aligned_buffer。sdmmc 驱动会按照
+ * 实际缓冲容量自动把所有非 DMA 目标读写拆成最多 8 个扇区一组，不再运行期
+ * 分配临时内存。4 KiB 对 20 MHz SPI 和 16 kHz 音频均有充足吞吐余量。
+ */
+#define SD_DMA_ALIGNED_BUFFER_SIZE 4096U
 
 static const char *TAG = "SD";
 static const char *FATFS_TAG = "SD_FATFS";
 static sdmmc_card_t *sd_card = NULL;
+/* 由本模块拥有；挂载期间被复制到 sd_card->host.dma_aligned_buffer。 */
+static void *sd_dma_aligned_buffer = NULL;
 
 esp_err_t sd_init(void)
 {
@@ -37,6 +51,21 @@ esp_err_t sd_init(void)
     /* SDSPI_HOST_DEFAULT() 使用 SPI 模式和 20 MHz 最高时钟。 */
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = board_spi_get_host();
+
+    /*
+     * board_spi_dma_alloc() 同时保证片内、DMA 能力和 SPI 总线所需对齐。
+     * 必须在挂载前申请：sdmmc_card_init() 会把 host 完整复制到 card->host，
+     * 后续 FreeType 和 WAV 的所有 FATFS 读取便会复用同一块中转内存。
+     */
+    sd_dma_aligned_buffer =
+        board_spi_dma_alloc(SD_DMA_ALIGNED_BUFFER_SIZE);
+    if (sd_dma_aligned_buffer == NULL) {
+        ESP_LOGE(TAG,
+                 "Cannot reserve %u-byte SD DMA staging buffer",
+                 (unsigned)SD_DMA_ALIGNED_BUFFER_SIZE);
+        return ESP_ERR_NO_MEM;
+    }
+    host.dma_aligned_buffer = sd_dma_aligned_buffer;
 
     sdspi_device_config_t device_config = SDSPI_DEVICE_CONFIG_DEFAULT();
     device_config.host_id = board_spi_get_host();
@@ -61,6 +90,8 @@ esp_err_t sd_init(void)
                                      &sd_card);
     if (result != ESP_OK) {
         sd_card = NULL;
+        board_spi_dma_free(sd_dma_aligned_buffer);
+        sd_dma_aligned_buffer = NULL;
         ESP_LOGW(TAG,
                  "Card mount failed on CS GPIO%d: %s",
                  SD_CS_GPIO,
@@ -69,9 +100,11 @@ esp_err_t sd_init(void)
     }
 
     ESP_LOGI(TAG,
-             "Card mounted at %s: SPI2 20 MHz, CS=GPIO%d",
+             "Card mounted at %s: SPI2 20 MHz, CS=GPIO%d, "
+             "DMA staging=%u bytes",
              SD_MOUNT_POINT,
-             SD_CS_GPIO);
+             SD_CS_GPIO,
+             (unsigned)SD_DMA_ALIGNED_BUFFER_SIZE);
     /*
      * 输出 SD 卡的识别信息和容量参数，方便确认卡片已经正确挂载：
      *
@@ -126,6 +159,8 @@ esp_err_t sd_deinit(void)
     }
 
     sd_card = NULL;
+    board_spi_dma_free(sd_dma_aligned_buffer);
+    sd_dma_aligned_buffer = NULL;
     return ESP_OK;
 }
 

@@ -5,14 +5,23 @@
  * @file es8311.h
  * @brief BOX3 板载 ES8311 播放 Codec 的公开控制接口。
  *
- * ES8311 固定使用 7 bit I2C 地址 0x18，并配置为 16 bit Philips I2S 从机。
- * 它只有一个单声道 DAC；OUTP/OUTN 是同一模拟信号的差分正负端，不是左右
- * 两路输出。寄存器 0x09 当前选择 I2S 左声道窗口，芯片不会自动混合 L/R。
+ * 数字音频连接为三根共享时钟输入加一根播放数据输入：GPIO21/MCLK、
+ * GPIO38/BCLK、GPIO39/LRCK 由 ESP32-S3 同时送给 ES8311 和 ES7210；播放
+ * PCM 单独经 GPIO40/DOUT 送入 ES8311 DSDIN。GPIO41/DIN 接收的是 ES7210
+ * TDM 数据，不是 ES8311 的 ADC 输出。
+ *
+ * ES8311 固定使用 7 bit I2C 地址 0x18。芯片的串行音频口支持 I2S、左对齐
+ * 和 DSP/PCM A/B，字长支持 16/18/20/24/32 bit；本驱动固定配置为 16 bit
+ * Philips I2S 从机。DSP/PCM 只是另一种串行帧格式，不表示芯片具有四通道
+ * TDM DAC。ES8311 只有一个单声道 DAC；OUTP/OUTN 是同一模拟信号的差分
+ * 正负端，不是左右两路输出。寄存器 0x09 当前选择 I2S 左声道窗口，芯片
+ * 不会自动混合 L/R。
  *
  * ESP32-S3 I2S0 为兼容 ES7210 四通道采集而输出四槽帧：
- * [slot0=L, slot1=0, slot2=R, slot3=0]。ES8311 仍按普通 I2S 读取 LRCK
- * 低/高半周期各自开头的 16 bit；当前单 DAC 实际使用 slot0。ESP32-S3 必须
- * 先启动 I2S TX，为 Codec 持续提供 MCLK/BCLK/WS，随后才能初始化本驱动。
+ * [slot0=L, slot1=0, slot2=R, slot3=0]。LRCK 的每个半周期占两个 16 bit
+ * 物理槽，但 ES8311 的有效字长是 16 bit，所以只读取每个半周期的第一个槽，
+ * 第二槽必须填 0；当前单 DAC 实际使用左窗口 slot0。ESP32-S3 必须先启动
+ * I2S TX，为 Codec 持续提供 MCLK/BCLK/WS，随后才能初始化本驱动。
  * 推荐的板级调用顺序为：
  *
  *   board_i2c_init()

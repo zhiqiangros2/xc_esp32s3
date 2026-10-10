@@ -1,0 +1,7 @@
+dependencies:
+  espressif/esp-dsp: "1.8.0"
+  espressif/esp-sr: "~2.4.7"
+  espressif/esp32-camera: "2.0.15"
+  espressif/freetype: "2.14.3~1"
+  joltwallet/littlefs: "1.20.4"
+  lvgl/lvgl: "9.6.0~1"

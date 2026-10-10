@@ -23,6 +23,12 @@ static const lvgl_language_texts_t s_texts[LVGL_LANGUAGE_COUNT] = {
         .record_stopping = "Saving",
         .record_saved = "Saved",
         .record_error = "Recording failed",
+        .wav_manager = "WAV files",
+        .wav_delete = "Delete",
+        .wav_select_file = "Select a WAV file",
+        .wav_selected = "Selected",
+        .wav_delete_success = "File deleted",
+        .wav_delete_error = "Delete failed",
     },
     [LVGL_LANGUAGE_ZH_CN] = {
         .test_item = "测试项",
@@ -44,6 +50,12 @@ static const lvgl_language_texts_t s_texts[LVGL_LANGUAGE_COUNT] = {
         .record_stopping = "正在保存",
         .record_saved = "已保存",
         .record_error = "录音失败",
+        .wav_manager = "WAV 管理",
+        .wav_delete = "删除",
+        .wav_select_file = "请选择 WAV 文件",
+        .wav_selected = "已选择",
+        .wav_delete_success = "文件已删除",
+        .wav_delete_error = "删除失败",
     },
 };
 

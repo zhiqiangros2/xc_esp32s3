@@ -9,10 +9,12 @@
 #include "camera.h"
 #include "display.h"
 #include "es8311.h"
+#include "es7210.h"
 #include "fatfs.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "gpio_isr_service.h"
 #include "i2c.h"
 #include "interrupt_manager.h"
 #include "key_interrupt.h"
@@ -22,6 +24,7 @@
 #include "lvgl_ui.h"
 #include "nvs_flash.h"
 #include "sd_fatfs.h"
+#include "speech_recognition.h"
 #include "spi.h"
 #include "tp.h"
 #include "wav_player.h"
@@ -30,7 +33,7 @@ static const char *TAG = "BOX3";
 
 void app_main(void)
 {
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    //vTaskDelay(pdMS_TO_TICKS(10000));
 
     /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
     esp_err_t err = nvs_flash_init();
@@ -43,6 +46,9 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     bsp_info_print();
+
+    /* 全局 GPIO ISR 服务只安装一次，供后续 GPIO0 和 GPIO42 中断共同使用。 */
+    ESP_ERROR_CHECK(board_gpio_isr_service_init());
 
     /* K0 独立连接 GPIO0，不经过 I2C 或 GPIO42 共享中断管理器。 */
     ESP_ERROR_CHECK(key_interrupt_init());
@@ -84,13 +90,6 @@ void app_main(void)
                  "Camera unavailable; continuing without camera: %s",
                  esp_err_to_name(camera_result));
     }
-
-    /*
-     * 触摸和摄像头初始化完成后才启动 GPIO42 中断任务，避免初始化期间出现
-     * 触摸 I2C 访问与摄像头 SCCB 配置同时占用 I2C0 的情况。
-     */
-    ESP_ERROR_CHECK(interrupt_manager_init(INTERRUPT_SOURCE_AW9523B |
-                                           INTERRUPT_SOURCE_TOUCH));
 
     /*
      * LCD 和 SD 共用 SPI2 的 SCLK=GPIO15、MOSI=GPIO16、MISO=GPIO17，
@@ -156,22 +155,44 @@ void app_main(void)
                  esp_err_to_name(littlefs_result));
     }
 
-    /*
-     * ES8311 使用 I2S 时钟作为内部工作时钟，因此先启动 48 kHz I2S，
-     * 等待时钟稳定后再通过 I2C 初始化 Codec。初始化完成后解除静音并
-     * 打开功放，后续停止播放时仍保持音频输出开启。
-     */
+    /* 创建 16 kHz 四槽 TDM 通道，并启用 TX 持续输出 MCLK/BCLK/WS。 */
     ESP_ERROR_CHECK(audio_i2s_init());
-    vTaskDelay(pdMS_TO_TICKS(100));
-    /* es8311_init() 内部解除静音，之后持续保持 Codec 音频输出开启。 */
+
+    /* 等待 I2S 时钟稳定后再配置依赖这些时钟工作的 ES8311。 */
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    /* 初始化 ES8311、设置 80% DAC 音量并解除数字静音。 */
     ESP_ERROR_CHECK(es8311_init());
+
+    /* 打开板级功放；停止播放时 Codec 和功放仍保持开启。 */
     ESP_ERROR_CHECK(aw9523b_set_box3_pa_enabled(true));
+
+    /*
+     * ES7210 与 ES8311 共用 I2S0 的 MCLK/BCLK/WS，因此也必须在 I2S 时钟
+     * 稳定后初始化。这里只建立四通道 ADC/TDM 硬件路径，不创建录音任务。
+     */
+    ESP_ERROR_CHECK(es7210_init());
 
     /* 播放器任务按需打开 SD 文件和音频硬件，不会阻塞 LVGL 事件处理。 */
     ESP_ERROR_CHECK(wav_player_init());
 
-    /* 初始化 ES7210 和事件驱动录音任务；录音文件保存到 /sdcard/music。 */
+    /*
+     * 创建录音缓冲、命令队列和后台任务，并启动 16 kHz 四槽 TDM 常驻 RX。
+     * RX 始终读取 ES7210 数据并向语音识别提供 MIC1+MIC3；界面的开始/停止
+     * 只控制 MIC1+MIC2 WAV 文件的创建和结束，不会启停 I2S 采集。
+     */
     ESP_ERROR_CHECK(audio_recorder_init());
+
+    /*
+     * AW9523B 的 K1/K2 与 CHSC5432 触摸控制器共用 GPIO42 低电平中断线。
+     * 两个设备都初始化完成后再启动共享中断管理器；GPIO ISR 只通知任务，
+     * 管理任务随后通过 I2C 依次查询触摸状态和 AW9523B 按键状态。
+     */
+    ESP_ERROR_CHECK(interrupt_manager_init(INTERRUPT_SOURCE_AW9523B |
+                                           INTERRUPT_SOURCE_TOUCH));
+
+    /* 启动“你好小鑫”唤醒、中文命令识别和红灯控制任务。 */
+    ESP_ERROR_CHECK(speech_recognition_init());
 
 #if 0
     /*

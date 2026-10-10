@@ -114,14 +114,7 @@ esp_err_t interrupt_manager_init(uint32_t source_flags)
         return ESP_ERR_NO_MEM;
     }
 
-    result = gpio_install_isr_service(0);
-    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
-        vTaskDelete(manager_task_handle);
-        manager_task_handle = NULL;
-        enabled_source_flags = 0;
-        return result;
-    }
-
+    /* 全局 ISR 服务已由 app_main() 安装，这里只注册 GPIO42 处理函数。 */
     result = gpio_isr_handler_add(SHARED_INTERRUPT_GPIO,
                                   shared_gpio_isr_handler,
                                   NULL);

@@ -59,8 +59,6 @@ static uint8_t previous_port0_input_levels = 0;
 static TickType_t last_key_change_ticks[AW9523B_PINS_PER_PORT] = {0};
 static bool aw9523b_interrupt_initialized = false;
 static bool box3_camera_powered = false;
-static bool red_led_on = false;
-static bool blue_led_on = false;
 
 /** 不加互斥锁的底层寄存器读操作，仅供驱动内部调用。 */
 static esp_err_t read_register_unlocked(uint8_t register_address, uint8_t *value)
@@ -131,7 +129,7 @@ static esp_err_t handle_key_change(uint8_t current_levels,
     const uint8_t k1_mask = (uint8_t)(1U << AW9523B_BOX3_KEY_K1);
     const uint8_t k2_mask = (uint8_t)(1U << AW9523B_BOX3_KEY_K2);
 
-    /* K1 默认高电平，变为低电平表示按下。 */
+    /* K1 默认高电平，变为低电平表示按下：同时打开红灯和蓝灯。 */
     if (key_change_is_valid(AW9523B_BOX3_KEY_K1,
                             current_levels,
                             previous_levels)) {
@@ -139,20 +137,22 @@ static esp_err_t handle_key_change(uint8_t current_levels,
                  (current_levels & k1_mask) != 0 ? "high" : "low");
 
         if ((current_levels & k1_mask) == 0) {
-            const bool new_state = !red_led_on;
             esp_err_t result = aw9523b_set_box3_led(AW9523B_BOX3_LED_RED,
-                                                     new_state);
+                                                     true);
             if (result != ESP_OK) {
                 return result;
             }
 
-            red_led_on = new_state;
-            ESP_LOGI(TAG, "K1 pressed, red LED %s",
-                     red_led_on ? "on" : "off");
+            result = aw9523b_set_box3_led(AW9523B_BOX3_LED_BLUE, true);
+            if (result != ESP_OK) {
+                return result;
+            }
+
+            ESP_LOGI(TAG, "K1 pressed, red and blue LEDs on");
         }
     }
-    
-    /* K2 默认低电平，变为高电平表示按下。 */
+
+    /* K2 默认低电平，变为高电平表示按下：同时关闭红灯和蓝灯。 */
     if (key_change_is_valid(AW9523B_BOX3_KEY_K2,
                             current_levels,
                             previous_levels)) {
@@ -160,16 +160,18 @@ static esp_err_t handle_key_change(uint8_t current_levels,
                  (current_levels & k2_mask) != 0 ? "high" : "low");
 
         if ((current_levels & k2_mask) != 0) {
-            const bool new_state = !blue_led_on;
-            esp_err_t result = aw9523b_set_box3_led(AW9523B_BOX3_LED_BLUE,
-                                                     new_state);
+            esp_err_t result = aw9523b_set_box3_led(AW9523B_BOX3_LED_RED,
+                                                     false);
             if (result != ESP_OK) {
                 return result;
             }
 
-            blue_led_on = new_state;
-            ESP_LOGI(TAG, "K2 pressed, blue LED %s",
-                     blue_led_on ? "on" : "off");
+            result = aw9523b_set_box3_led(AW9523B_BOX3_LED_BLUE, false);
+            if (result != ESP_OK) {
+                return result;
+            }
+
+            ESP_LOGI(TAG, "K2 pressed, red and blue LEDs off");
         }
     }
 

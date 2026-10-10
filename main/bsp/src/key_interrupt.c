@@ -132,18 +132,7 @@ esp_err_t key_interrupt_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    /*
-     * 安装 GPIO 公共 ISR 服务。参数 0 表示使用默认中断分配配置。
-     * ESP_ERR_INVALID_STATE 表示服务已由其他模块安装，可以继续注册回调。
-     */
-    result = gpio_install_isr_service(0);
-    if (result != ESP_OK && result != ESP_ERR_INVALID_STATE) {
-        vTaskDelete(key_task_handle);
-        key_task_handle = NULL;
-        return result;
-    }
-
-    /* 将 GPIO0 的下降沿中断绑定到 K0 中断服务函数。 */
+    /* 全局 ISR 服务已由 app_main() 安装，这里只注册 GPIO0 处理函数。 */
     result = gpio_isr_handler_add(KEY_GPIO, key_isr_handler, NULL);
     if (result != ESP_OK) {
         vTaskDelete(key_task_handle);

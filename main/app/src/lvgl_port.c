@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -21,7 +22,13 @@
 /*
  * FreeType 灰度光栅器的 gray_convert_glyph() 单个栈帧约为 16.2 KiB，
  * 再加上 LVGL 绘制和 FreeType 上层调用，需要为主任务保留 32 KiB 栈。
- * ESP-IDF 的 xTaskCreate() 栈大小参数以字节为单位。
+ * ESP-IDF 的任务栈大小参数以字节为单位。
+ *
+ * LVGL 会在本任务中通过 FreeType 按需读取 SD 字体。ESP-IDF 的 SDSPI 驱动
+ * 会直接把若干局部控制变量交给 SPI DMA，因此任务栈必须位于片内 RAM；如果
+ * 栈位于 PSRAM，底层每次轮询 SD 都要动态申请片内 DMA 临时缓冲，片内堆紧张
+ * 时会报 "Failed to allocate priv TX buffer"。这里使用文件级静态数组在链接期
+ * 预留连续的片内栈，不依赖 ESP-SR 启动后的动态堆状态。
  */
 #define LVGL_TASK_STACK_SIZE (32U * 1024U)
 
@@ -39,6 +46,9 @@ static const char *TAG = "LVGL";
 
 /* LVGL 主任务句柄，用于确认任务是否创建以及初始化失败时删除任务。 */
 static TaskHandle_t lvgl_task_handle = NULL;
+/* LVGL 任务控制块和 32 KiB 栈均由静态存储提供，不在运行期申请或释放。 */
+static StaticTask_t lvgl_task_control_block;
+static StackType_t lvgl_task_stack[LVGL_TASK_STACK_SIZE];
 
 /* 代表 320x240 LCD 的 LVGL 显示设备对象。 */
 static lv_display_t *lvgl_display = NULL;
@@ -344,6 +354,7 @@ static void lvgl_task(void *argument)
 static void lvgl_release_resources(void)
 {
     if (lvgl_task_handle != NULL) {
+        /* 静态任务只删除调度对象；TCB 和栈数组属于本文件，不能释放。 */
         vTaskDelete(lvgl_task_handle);
         lvgl_task_handle = NULL;
     }
@@ -486,21 +497,36 @@ esp_err_t lvgl_port_start(void)
         return ESP_OK;
     }
 
-    /* 创建统一负责触摸、LVGL 定时器、布局、绘制和显示刷新的任务。 */
-    const BaseType_t lvgl_task_create_result = xTaskCreate(lvgl_task,
-                                                            "lvgl",
-                                                            LVGL_TASK_STACK_SIZE,
-                                                            NULL,
-                                                            LVGL_TASK_PRIORITY,
-                                                            &lvgl_task_handle);
-    if (lvgl_task_create_result != pdPASS) {
+    /*
+     * 使用链接期已预留的片内 TCB 和栈创建任务。LVGL/FreeType 发起 SD-SPI
+     * 访问时，SDSPI 的局部事务描述和单字节轮询变量因而都位于片内 RAM，
+     * SPI DMA 可以直接访问，不会再为这些控制事务动态申请临时缓冲。
+     */
+    lvgl_task_handle = xTaskCreateStatic(lvgl_task,
+                                         "lvgl",
+                                         LVGL_TASK_STACK_SIZE,
+                                         NULL,
+                                         LVGL_TASK_PRIORITY,
+                                         lvgl_task_stack,
+                                         &lvgl_task_control_block);
+    if (lvgl_task_handle == NULL) {
+        ESP_LOGE(TAG,
+                 "Failed to create LVGL task: static internal stack=%u bytes; "
+                 "internal free/largest=%u/%u",
+                 (unsigned)LVGL_TASK_STACK_SIZE,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                                    MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         return ESP_ERR_NO_MEM;
     }
 
     /* 首屏已经创建完成，现在才允许 LVGL 执行第一次布局和刷新。 */
     ESP_LOGI(TAG,
-              "LVGL 9 ready: %ux%u, RGB565, draw buffers=2x full screen in PSRAM, task=single",
+              "LVGL 9 ready: %ux%u, RGB565, draw buffers=2x full screen "
+              "in PSRAM, task=single, stack=%u bytes in internal RAM",
               LCD_X_RESOLUTION,
-              LCD_Y_RESOLUTION);
+              LCD_Y_RESOLUTION,
+              (unsigned)LVGL_TASK_STACK_SIZE);
     return ESP_OK;
 }

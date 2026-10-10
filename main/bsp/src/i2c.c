@@ -18,6 +18,40 @@ static SemaphoreHandle_t i2c_bus_mutex = NULL;
 static bool i2c_bus_owned = false;
 static bool i2c_initialized = false;
 
+/**
+ * @brief 在一次同步事务异常结束后恢复 I2C0 控制器状态。
+ *
+ * ESP-IDF 的同步 I2C 事务只有在中断状态机最终进入 I2C_STATUS_DONE 时才
+ * 返回 ESP_OK。如果一次事务结束后状态机没有进入 DONE，驱动返回
+ * ESP_ERR_INVALID_STATE；单纯延时不会清除该状态，后续事务可能继续失败。
+ *
+ * 调用本函数时，调用者必须仍持有 i2c_bus_mutex，确保复位期间不会有板级
+ * 触摸、AW9523B 或音频 Codec 事务进入同一控制器。复位只清理 I2C 硬件
+ * FSM 和驱动事务状态，不删除总线上的设备句柄，也不改变各设备通信速率。
+ * 本函数不重新发送失败的事务；ES8311/ES7210 原有的有限次数重试负责决定
+ * 是否再次发送，因此不会在板级驱动中形成隐藏的无限重试。
+ *
+ * @param transaction_result 刚结束的 I2C 事务返回值。
+ */
+static void recover_bus_after_invalid_state(esp_err_t transaction_result)
+{
+    if (transaction_result != ESP_ERR_INVALID_STATE) {
+        return;
+    }
+
+    const esp_err_t reset_result = i2c_master_bus_reset(i2c_bus_handle);
+    if (reset_result == ESP_OK) {
+        ESP_LOGW(TAG,
+                 "I2C0 transaction state invalid; controller reset for next "
+                 "retry");
+    } else {
+        ESP_LOGE(TAG,
+                 "I2C0 controller reset failed after invalid transaction "
+                 "state: %s",
+                 esp_err_to_name(reset_result));
+    }
+}
+
 esp_err_t board_i2c_init(void)
 {
     if (i2c_initialized) {
@@ -101,6 +135,7 @@ esp_err_t board_i2c_probe(uint16_t device_address, int timeout_ms)
     const esp_err_t result = i2c_master_probe(i2c_bus_handle,
                                                device_address,
                                                timeout_ms);
+    recover_bus_after_invalid_state(result);
     xSemaphoreGive(i2c_bus_mutex);
     return result;
 }
@@ -155,6 +190,7 @@ esp_err_t board_i2c_transmit(board_i2c_device_handle_t device,
                                            data,
                                            data_size,
                                            timeout_ms);
+    recover_bus_after_invalid_state(result);
     xSemaphoreGive(i2c_bus_mutex);
     return result;
 }
@@ -178,6 +214,7 @@ esp_err_t board_i2c_transmit_receive(board_i2c_device_handle_t device,
                                                     read_data,
                                                     read_size,
                                                     timeout_ms);
+    recover_bus_after_invalid_state(result);
     xSemaphoreGive(i2c_bus_mutex);
     return result;
 }
