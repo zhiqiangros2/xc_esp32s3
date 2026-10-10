@@ -8,6 +8,8 @@ idf_component_register(
         "bsp/src/aw9523b.c"
         "bsp/src/audio_i2s.c"
         "bsp/src/es8311.c"
+        "bsp/src/es7210.c"
+        "bsp/src/audio_recorder.c"
         "bsp/src/wav_player.c"
         "bsp/src/spi.c"
         "bsp/src/lcd.c"
@@ -21,6 +23,7 @@ idf_component_register(
         "app/src/lvgl_language.c"
         "app/src/lvgl_port.c"
         "app/src/lvgl_music_page.c"
+        "app/src/lvgl_record_page.c"
         "app/src/lvgl_test_page.c"
         "app/src/lvgl_ui.c"
     PRIV_REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_sdspi esp_driver_spi esp_lcd esp_psram esp_system esp_timer espressif__esp32-camera fatfs heap littlefs lvgl nvs_flash sdmmc spi_flash wear_levelling

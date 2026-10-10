@@ -55,6 +55,15 @@ typedef struct {
     char path[MUSIC_PATH_MAX];
 } music_track_context_t;
 
+/*
+ * 扫描阶段使用的临时文件名节点。先把 FATFS 返回的 d_name 复制到这些节点，
+ * 关闭目录后再创建 LVGL 控件，避免目录遍历和界面对象创建交叉进行。
+ */
+typedef struct music_file_entry {
+    struct music_file_entry *next;
+    char name[];
+} music_file_entry_t;
+
 /** 根据页面语言选择字体；中文优先使用调用者传入的完整字库。 */
 static const lv_font_t *interface_font(const music_page_context_t *context)
 {
@@ -301,11 +310,15 @@ static bool add_track_button(lv_obj_t *list,
 }
 
 /**
- * @brief 扫描音乐目录并为每个 .wav 文件创建按钮。
+ * @brief 先扫描音乐目录，再为内存中的 WAV 文件名创建按钮。
  *
- * 扫描发生在页面创建阶段并运行于 LVGL 任务。目录无法打开时显示目录错误；
- * 目录可读但没有成功加入任何 WAV 时显示空目录提示。返回值目前用于表达结果，
- * 调用者不依赖具体数量。
+ * 本函数严格分成两个阶段：
+ *
+ * 1. 打开 /sdcard/music，只扫描 .wav 目录项并把文件名复制到临时链表；
+ * 2. 关闭目录，确保 FATFS 扫描结束后，再依次创建文件按钮和文字标签。
+ *
+ * 因此 LVGL 不会在 readdir() 尚未结束时构建文件列表。目录无法打开时显示
+ * 目录错误；没有扫描到 WAV，或所有按钮均创建失败时显示空目录提示。
  */
 static size_t populate_music_list(lv_obj_t *list,
                                   music_page_context_t *context)
@@ -320,18 +333,52 @@ static size_t populate_music_list(lv_obj_t *list,
         return 0;
     }
 
-    size_t count = 0;
+    music_file_entry_t *file_list = NULL;
+    music_file_entry_t *file_list_tail = NULL;
     struct dirent *entry;
-    /* FATFS 返回顺序即列表顺序；当前不额外排序，也不进入子目录。 */
+
+    /*
+     * 第一阶段只访问 SD/FATFS。dirent 中的 d_name 会在下一次 readdir() 时
+     * 失效，所以必须为每个文件名分配独立内存，不能保存 d_name 指针。
+     * FATFS 返回顺序即后续显示顺序；当前不额外排序，也不进入子目录。
+     */
     while ((entry = readdir(directory)) != NULL) {
         if (!is_wav_file(entry->d_name)) {
             continue;
         }
-        if (add_track_button(list, context, entry->d_name)) {
+
+        const size_t name_length = strlen(entry->d_name);
+        music_file_entry_t *file =
+            malloc(sizeof(*file) + name_length + 1U);
+        if (file == NULL) {
+            /* 保留已经扫描到的文件；关闭目录后仍可显示这部分列表。 */
+            continue;
+        }
+        file->next = NULL;
+        memcpy(file->name, entry->d_name, name_length + 1U);
+
+        if (file_list_tail == NULL) {
+            file_list = file;
+        } else {
+            file_list_tail->next = file;
+        }
+        file_list_tail = file;
+    }
+
+    /* 第二阶段开始前必须先结束目录访问。 */
+    closedir(directory);
+
+    size_t count = 0;
+    while (file_list != NULL) {
+        music_file_entry_t *file = file_list;
+        file_list = file->next;
+
+        if (add_track_button(list, context, file->name)) {
             ++count;
         }
+        /* 按钮内部已经复制完整路径，临时扫描节点可以立即释放。 */
+        free(file);
     }
-    closedir(directory);
 
     if (count == 0) {
         const lvgl_language_texts_t *texts =

@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include "audio_i2s.h"
+#include "audio_recorder.h"
 #include "aw9523b.h"
 #include "bsp_info.h"
 #include "camera.h"
@@ -24,8 +25,6 @@
 #include "spi.h"
 #include "tp.h"
 #include "wav_player.h"
-
-#define AUDIO_STARTUP_SAMPLE_RATE_HZ 48000U
 
 static const char *TAG = "BOX3";
 
@@ -162,7 +161,7 @@ void app_main(void)
      * 等待时钟稳定后再通过 I2C 初始化 Codec。初始化完成后解除静音并
      * 打开功放，后续停止播放时仍保持音频输出开启。
      */
-    ESP_ERROR_CHECK(audio_i2s_init(AUDIO_STARTUP_SAMPLE_RATE_HZ));
+    ESP_ERROR_CHECK(audio_i2s_init());
     vTaskDelay(pdMS_TO_TICKS(100));
     /* es8311_init() 内部解除静音，之后持续保持 Codec 音频输出开启。 */
     ESP_ERROR_CHECK(es8311_init());
@@ -170,6 +169,9 @@ void app_main(void)
 
     /* 播放器任务按需打开 SD 文件和音频硬件，不会阻塞 LVGL 事件处理。 */
     ESP_ERROR_CHECK(wav_player_init());
+
+    /* 初始化 ES7210 和事件驱动录音任务；录音文件保存到 /sdcard/music。 */
+    ESP_ERROR_CHECK(audio_recorder_init());
 
 #if 0
     /*

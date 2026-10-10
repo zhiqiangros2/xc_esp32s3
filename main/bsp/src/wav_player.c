@@ -376,7 +376,7 @@ static esp_err_t parse_wav(FILE *file, wav_format_t *format)
  */
 static esp_err_t start_audio_output(uint32_t sample_rate_hz)
 {
-    esp_err_t result = audio_i2s_set_sample_rate(sample_rate_hz);
+    esp_err_t result = audio_i2s_playback_start(sample_rate_hz);
     if (result != ESP_OK) {
         ESP_LOGE(TAG,
                  "Audio startup stage failed: I2S sample-rate setup: %s",
@@ -479,6 +479,7 @@ static void audio_writer_task(void *argument)
              * 先清除旧消息，再确认 STOPPED，避免读任务过早覆盖仍在使用的数据。
              */
             active = false;
+            (void)audio_i2s_playback_stop();
             discard_pending_writer_messages();
             send_reader_message(READER_MESSAGE_WRITER_STOPPED, 0, ESP_OK);
             continue;
@@ -491,6 +492,7 @@ static void audio_writer_task(void *argument)
              */
             if (active) {
                 active = false;
+                (void)audio_i2s_playback_stop();
                 send_reader_message(READER_MESSAGE_WRITER_ERROR,
                                     0,
                                     ESP_ERR_INVALID_STATE);
@@ -501,6 +503,8 @@ static void audio_writer_task(void *argument)
                 start_audio_output(message.data.sample_rate_hz);
             active = result == ESP_OK;
             if (result != ESP_OK) {
+                /* start_audio_output() 后半段失败时回滚已登记的播放占用。 */
+                (void)audio_i2s_playback_stop();
                 send_reader_message(READER_MESSAGE_WRITER_ERROR, 0, result);
             }
             continue;
@@ -520,6 +524,7 @@ static void audio_writer_task(void *argument)
             block.data_size == 0 ||
             block.data_size > get_audio_buffer_capacity(block.index)) {
             active = false;
+            (void)audio_i2s_playback_stop();
             send_reader_message(READER_MESSAGE_WRITER_ERROR,
                                 0,
                                 ESP_ERR_INVALID_SIZE);
@@ -545,6 +550,7 @@ static void audio_writer_task(void *argument)
                                     &queued_message,
                                     0);
                 active = false;
+                (void)audio_i2s_playback_stop();
                 stopped = true;
                 discard_pending_writer_messages();
                 send_reader_message(READER_MESSAGE_WRITER_STOPPED,
@@ -595,6 +601,7 @@ static void audio_writer_task(void *argument)
         }
         if (result != ESP_OK || offset != block.data_size) {
             active = false;
+            (void)audio_i2s_playback_stop();
             send_reader_message(READER_MESSAGE_WRITER_ERROR,
                                 0,
                                 result == ESP_OK ? ESP_FAIL : result);
@@ -610,6 +617,7 @@ static void audio_writer_task(void *argument)
                             ESP_OK);
         if (block.is_last) {
             active = false;
+            (void)audio_i2s_playback_stop();
             send_reader_message(READER_MESSAGE_WRITER_FINISHED, 0, ESP_OK);
         }
     }

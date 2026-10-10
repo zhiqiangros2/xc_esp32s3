@@ -498,7 +498,7 @@ esp_err_t tp_interrupt_process(void)
             ESP_LOGI(TAG, "Touch released");
         }
     } else {
-        #if 1
+        #if 0
         /* 当前仍有触摸时，依次输出转换后的 LCD/LVGL 坐标。 */
         for (uint8_t index = 0; index < state.point_count; ++index) {
             ESP_LOGI(TAG, "Point %u/%u: x=%u, y=%u, event=0x%02X",

@@ -23,6 +23,14 @@ typedef struct {
     const char *music_error;
     const char *music_directory_error;
     const char *music_empty;
+    const char *record;
+    const char *record_start;
+    const char *record_idle;
+    const char *record_starting;
+    const char *record_recording;
+    const char *record_stopping;
+    const char *record_saved;
+    const char *record_error;
 } lvgl_language_texts_t;
 
 /** 获取指定语言的全部 UTF-8 界面文本，无效语言回退为英文。 */

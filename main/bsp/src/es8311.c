@@ -2,9 +2,35 @@
  * @file es8311.c
  * @brief BOX3 板载 ES8311 音频编解码器的播放侧驱动。
  *
- * ES8311 通过 I2C0 配置、通过 I2S0 接收 PCM。当前驱动只启用播放所需的
- * DAC 信号路径，不实现麦克风录音接口。调用 es8311_init() 前必须先启动
- * I2S 时钟，否则 Codec 复位和时钟管理寄存器可能无法进入稳定状态。
+ * ES8311 通过 I2C0 接收寄存器配置，通过 I2S0 的独立 TX 数据线接收播放
+ * PCM。ESP32-S3 是 I2S 主机，ES8311 是 I2S 从机；本驱动只对外提供播放
+ * 所需的 DAC 控制，初始化表中保留的 ADC 配置仅用于保持正点原子参考时序
+ * 完整，ES8311 的数字麦克风输入保持关闭。
+ *
+ * 必须区分“物理总线采用四槽帧”和“ES8311 的能力”：ES8311 不是四通道
+ * TDM Codec，它只有一个单声道 DAC。OUTP/OUTN 是该 DAC 的差分正、负输出，
+ * 不是左、右声道；该差分信号一方面送往功放，另一方面接到 ES7210 MIC3
+ * 作为后续 AEC 的播放参考。
+ *
+ * I2S0 因 ES7210 采集需要而统一使用 16 bit、四槽、64fs 帧。ES8311 仍按
+ * 普通 Philips I2S 解析 WS/LRCK：低、高半周期各为 32 BCLK 的左、右窗口，
+ * 每个窗口只读取开头的 16 bit。因此 ESP32 的 TX 排列为：
+ *
+ *   slot0=L，slot1=0，slot2=R，slot3=0
+ *
+ * 寄存器 0x09 当前写 0x0C：bit7 SDP_IN_SEL=0，单 DAC 选择左窗口，即实际
+ * 使用 slot0=L；它不会自动把 L/R 混合。若改为选择右窗口则使用 slot2=R。
+ * 不能发送 [L,R,0,0]，因为 R 会落入左窗口的填充槽，而右窗口读到 0。
+ *
+ * 48 kHz 时，BCLK=48000 x 4 x 16=3.072 MHz（64fs），MCLK=12.288 MHz
+ *（256fs）。切换 WAV 采样率时三个时钟同比变化，槽数和倍频关系不变，所以
+ * 播放器只需重配 ESP32-S3 I2S 时钟，不重新初始化 ES8311。
+ *
+ * 调用顺序：
+ * 1. board_i2c_init() 创建板级共享 I2C0 总线；
+ * 2. audio_i2s_init() 启动 TX，持续输出 BCLK 和 WS；
+ * 3. 等待时钟稳定后调用 es8311_init()；
+ * 4. 最后打开板级功放，播放期间按需调用音量或静音接口。
  */
 #include "es8311.h"
 
@@ -26,40 +52,49 @@
 #define ES8311_I2C_WRITE_MAX_ATTEMPTS 3
 /* I2C 重试及初始化表相邻寄存器写入之间的统一稳定时间，单位毫秒。 */
 #define ES8311_I2C_DELAY_MS 10
+/* 写入复位控制后，等待内部时钟、状态机和模拟电路稳定的时间。 */
+#define ES8311_RESET_SETTLE_DELAY_MS 100
 /* 上电初始化完成后设置 DAC 默认输出音量为 80%。 */
 #define ES8311_DEFAULT_OUTPUT_VOLUME_PERCENT 80U
+/* 公开音量接口的百分比上限以及 DAC 音量寄存器的满量程值。 */
+#define ES8311_VOLUME_PERCENT_MAX 100U
+#define ES8311_DAC_VOLUME_REGISTER_MAX 0xFFU
+/* RESET_REG00 的主从模式位：清零后 ES8311 工作在 I2S 从机模式。 */
+#define ES8311_MASTER_MODE_MASK 0x40U
+/* DAC_REG31 的数字静音控制位域，写 0x60 静音、写 0x00 解除静音。 */
+#define ES8311_DAC_MUTE_MASK 0x60U
 
-/* ES8311 寄存器地址。按功能分为复位、时钟、串行口、系统、ADC、DAC 和 GPIO。 */
-#define ES8311_REG_RESET 0x00
-#define ES8311_REG_CLOCK_MANAGER_01 0x01
-#define ES8311_REG_CLOCK_MANAGER_02 0x02
-#define ES8311_REG_CLOCK_MANAGER_03 0x03
-#define ES8311_REG_CLOCK_MANAGER_04 0x04
-#define ES8311_REG_CLOCK_MANAGER_05 0x05
-#define ES8311_REG_CLOCK_MANAGER_06 0x06
-#define ES8311_REG_CLOCK_MANAGER_07 0x07
-#define ES8311_REG_CLOCK_MANAGER_08 0x08
-#define ES8311_REG_SDP_INPUT 0x09
-#define ES8311_REG_SDP_OUTPUT 0x0A
-#define ES8311_REG_SYSTEM_0B 0x0B
-#define ES8311_REG_SYSTEM_0C 0x0C
-#define ES8311_REG_SYSTEM_0D 0x0D
-#define ES8311_REG_SYSTEM_0E 0x0E
-#define ES8311_REG_SYSTEM_10 0x10
-#define ES8311_REG_SYSTEM_11 0x11
-#define ES8311_REG_SYSTEM_12 0x12
-#define ES8311_REG_SYSTEM_13 0x13
-#define ES8311_REG_SYSTEM_14 0x14
-#define ES8311_REG_ADC_15 0x15
-#define ES8311_REG_ADC_16 0x16
-#define ES8311_REG_ADC_17 0x17
-#define ES8311_REG_ADC_1B 0x1B
-#define ES8311_REG_ADC_1C 0x1C
-#define ES8311_REG_DAC_31 0x31
-#define ES8311_REG_DAC_32 0x32
-#define ES8311_REG_DAC_37 0x37
-#define ES8311_REG_GPIO_44 0x44
-#define ES8311_REG_GPIO_45 0x45
+/* ES8311 寄存器地址。寄存器只在本驱动内部使用，不暴露给应用层。 */
+#define ES8311_REG_RESET 0x00            /* 数字电路、状态机和时钟复位。 */
+#define ES8311_REG_CLOCK_MANAGER_01 0x01 /* 时钟源选择、极性及总时钟使能。 */
+#define ES8311_REG_CLOCK_MANAGER_02 0x02 /* 时钟预分频和预倍频。 */
+#define ES8311_REG_CLOCK_MANAGER_03 0x03 /* ADC 速率模式和过采样率。 */
+#define ES8311_REG_CLOCK_MANAGER_04 0x04 /* DAC 过采样率。 */
+#define ES8311_REG_CLOCK_MANAGER_05 0x05 /* ADC/DAC 工作时钟分频。 */
+#define ES8311_REG_CLOCK_MANAGER_06 0x06 /* BCLK 极性和分频。 */
+#define ES8311_REG_CLOCK_MANAGER_07 0x07 /* 三态控制、LRCK 分频高位。 */
+#define ES8311_REG_CLOCK_MANAGER_08 0x08 /* LRCK 分频低位。 */
+#define ES8311_REG_SDP_INPUT 0x09        /* DAC 输入格式、位宽及左右窗口选择。 */
+#define ES8311_REG_SDP_OUTPUT 0x0A       /* ADC 串行数据输出格式。 */
+#define ES8311_REG_SYSTEM_0B 0x0B       /* 系统控制 0B。 */
+#define ES8311_REG_SYSTEM_0C 0x0C       /* 系统控制 0C。 */
+#define ES8311_REG_SYSTEM_0D 0x0D       /* 系统上电/掉电控制。 */
+#define ES8311_REG_SYSTEM_0E 0x0E       /* 系统电源管理。 */
+#define ES8311_REG_SYSTEM_10 0x10       /* 模拟系统上电配置。 */
+#define ES8311_REG_SYSTEM_11 0x11       /* 模拟系统上电配置。 */
+#define ES8311_REG_SYSTEM_12 0x12       /* DAC 输出通路控制。 */
+#define ES8311_REG_SYSTEM_13 0x13       /* 系统模拟通路配置。 */
+#define ES8311_REG_SYSTEM_14 0x14       /* 模拟 PGA 和 DMIC 选择。 */
+#define ES8311_REG_ADC_15 0x15          /* ADC 斜坡及 DMIC 检测。 */
+#define ES8311_REG_ADC_16 0x16          /* ADC 输入和增益配置。 */
+#define ES8311_REG_ADC_17 0x17          /* ADC 数字音量。 */
+#define ES8311_REG_ADC_1B 0x1B          /* ADC 自动静音和高通滤波。 */
+#define ES8311_REG_ADC_1C 0x1C          /* ADC 均衡器和高通滤波。 */
+#define ES8311_REG_DAC_31 0x31          /* DAC 数字静音。 */
+#define ES8311_REG_DAC_32 0x32          /* DAC 数字音量。 */
+#define ES8311_REG_DAC_37 0x37          /* DAC 音量斜坡速率。 */
+#define ES8311_REG_GPIO_44 0x44         /* GPIO 和内部测试通路配置。 */
+#define ES8311_REG_GPIO_45 0x45         /* 通用控制寄存器。 */
 
 typedef struct {
     /* 要写入的 8 bit 寄存器地址。 */
@@ -79,6 +114,10 @@ static const char *TAG = "ES8311";
  *
  * ES8311 的写事务为两个字节：[寄存器地址, 寄存器值]。最终失败时保留底层
  * esp_err_t，便于上层日志判断是超时、NACK 还是总线状态错误。
+ *
+ * @param address 8 bit 寄存器地址。
+ * @param value 要写入的完整 8 bit 寄存器值。
+ * @return ESP_OK 写入成功；否则返回最后一次 I2C 传输错误。
  */
 static esp_err_t write_register(uint8_t address, uint8_t value)
 {
@@ -120,6 +159,10 @@ static esp_err_t write_register(uint8_t address, uint8_t value)
  *
  * 使用“先发送寄存器地址、再重复起始读取 1 字节”的组合事务，避免发送地址
  * 与读取数据之间释放总线。
+ *
+ * @param address 8 bit 寄存器地址。
+ * @param value 接收寄存器值的有效指针。
+ * @return ESP_OK 读取成功；否则返回最后一次 I2C 组合事务错误。
  */
 static esp_err_t read_register(uint8_t address, uint8_t *value)
 {
@@ -163,6 +206,11 @@ static esp_err_t read_register(uint8_t address, uint8_t *value)
  *
  * 新值计算方式为 (旧值 & ~clear_mask) | set_mask。调用方应让 set_mask 只
  * 包含 clear_mask 范围内的位，以免意外改变其他功能位。
+ *
+ * @param address 需要修改的寄存器地址。
+ * @param clear_mask 先从旧值中清除的位。
+ * @param set_mask 清除后需要重新置位的位。
+ * @return ESP_OK 修改成功；否则返回寄存器读取或写入错误。
  */
 static esp_err_t update_register(uint8_t address,
                                  uint8_t clear_mask,
@@ -181,9 +229,21 @@ static esp_err_t update_register(uint8_t address,
 /**
  * @brief 探测并初始化固定地址为 0x18 的 ES8311。
  *
- * 初始化分两阶段：第一阶段建立基础时钟并触发复位，等待内部电路稳定后解除
- * 复位；第二阶段配置 I2S 从机格式、DAC/ADC 信号路径和 GPIO。任何一步失败
- * 都删除 I2C 设备句柄，使后续调用能够完整重试。
+ * 完整流程：
+ * 1. 若已经成功初始化，直接返回，避免重复复位正在工作的 Codec；
+ * 2. 探测原理图固定的 7 bit 地址 0x18；
+ * 3. 以 100 kHz 把设备加入板级共享 I2C0 总线；
+ * 4. 写第一阶段寄存器，建立基础时钟和模拟电源状态并触发内部复位；
+ * 5. 等待 100 ms 后清除主模式位，使 ES8311 作为 I2S 从机；
+ * 6. 写第二阶段寄存器，选择 BCLK 时钟源，配置 16 bit Philips I2S，并让
+ *    单 DAC 选择左声道窗口，再配置 ADC/DAC 信号路径、音量斜坡和 GPIO；
+ * 7. 把 DAC 音量改为项目默认的 80%，然后解除数字静音；
+ * 8. 任一步失败都移除本次创建的 I2C 设备句柄并恢复未初始化状态。
+ *
+ * 调用前必须已经初始化 I2C，并让 I2S TX 持续输出稳定的 BCLK/WS。Codec
+ * 初始化不负责板级功放使能，功放由 aw9523b 驱动在外层启动流程中打开。
+ *
+ * @return ESP_OK 初始化完成；否则返回探测、添加设备或寄存器事务错误。
  */
 esp_err_t es8311_init(void)
 {
@@ -216,23 +276,23 @@ esp_err_t es8311_init(void)
     }
 
     /*
-     * 第一阶段配置基础时钟和模拟电源，再通过 RESET 寄存器触发内部复位。
-     * 16 位立体声时 BCLK 为 32fs，当前寄存器组合让 ES8311 使用该时钟关系。
-     * 数组顺序属于上电时序的一部分，不能按寄存器地址随意排序。
+     * 第一阶段让时钟树、ADC/DAC 分频和模拟系统进入参考初始状态，最后写
+     * RESET_REG00=0x80 触发内部复位。数组顺序属于上电时序的一部分，不能
+     * 按寄存器地址排序，也不能把复位写入提前。
      */
     static const es8311_register_value_t initialization[] = {
-        {ES8311_REG_GPIO_45, 0x00},
-        {ES8311_REG_CLOCK_MANAGER_01, 0x30},
-        {ES8311_REG_CLOCK_MANAGER_02, 0x00},
-        {ES8311_REG_CLOCK_MANAGER_03, 0x10},
-        {ES8311_REG_ADC_16, 0x24},
-        {ES8311_REG_CLOCK_MANAGER_04, 0x10},
-        {ES8311_REG_CLOCK_MANAGER_05, 0x00},
-        {ES8311_REG_SYSTEM_0B, 0x00},
-        {ES8311_REG_SYSTEM_0C, 0x00},
-        {ES8311_REG_SYSTEM_10, 0x1F},
-        {ES8311_REG_SYSTEM_11, 0x7F},
-        {ES8311_REG_RESET, 0x80},
+        {ES8311_REG_GPIO_45, 0x00},            /* 通用控制恢复参考状态。 */
+        {ES8311_REG_CLOCK_MANAGER_01, 0x30},  /* 复位前打开基础时钟域。 */
+        {ES8311_REG_CLOCK_MANAGER_02, 0x00},  /* 预分频/预倍频恢复初值。 */
+        {ES8311_REG_CLOCK_MANAGER_03, 0x10},  /* ADC 过采样参数初值。 */
+        {ES8311_REG_ADC_16, 0x24},            /* ADC 模拟输入参考配置。 */
+        {ES8311_REG_CLOCK_MANAGER_04, 0x10},  /* DAC 过采样参数初值。 */
+        {ES8311_REG_CLOCK_MANAGER_05, 0x00},  /* ADC/DAC 时钟不再分频。 */
+        {ES8311_REG_SYSTEM_0B, 0x00},         /* 清除系统控制状态。 */
+        {ES8311_REG_SYSTEM_0C, 0x00},         /* 清除系统控制状态。 */
+        {ES8311_REG_SYSTEM_10, 0x1F},         /* 建立模拟系统上电状态。 */
+        {ES8311_REG_SYSTEM_11, 0x7F},         /* 建立模拟系统上电状态。 */
+        {ES8311_REG_RESET, 0x80},             /* 触发数字核心复位。 */
     };
 
     /* 每次写前保留稳定时间；失败立即转到统一资源清理路径。 */
@@ -245,41 +305,49 @@ esp_err_t es8311_init(void)
         }
     }
     /* 复位写入后等待 Codec 内部时钟和模拟模块稳定。 */
-    vTaskDelay(pdMS_TO_TICKS(80));
+    vTaskDelay(pdMS_TO_TICKS(ES8311_RESET_SETTLE_DELAY_MS));
 
-    /* 清除 RESET 寄存器的 0x40 位，同时保留其他位当前状态。 */
-    result = update_register(ES8311_REG_RESET, 0x40, 0x00);
+    /* 清除主模式位，同时保留复位寄存器中的其他状态，使 Codec 成为从机。 */
+    result = update_register(ES8311_REG_RESET,
+                             ES8311_MASTER_MODE_MASK,
+                             0x00);
     if (result != ESP_OK) {
         goto init_failed;
     }
 
     /*
-     * 第二阶段配置时钟分频、I2S 数据格式以及 DAC/模拟输出信号路径。
-     * 表内也保留 ADC 相关基础配置，以维持参考初始化序列的完整状态。
+     * 以下时钟和模拟路径值沿用已验证的板级参考配置。当前外部串行总线由
+     * ESP32-S3 产生：四个 16 bit 槽使 BCLK=64fs，MCLK 保持 256fs；ES8311
+     * 作为从机只在每个 32 BCLK 的 LRCK 半周期读取开头 16 bit，额外 16 bit
+     * 是填充时间，不代表 ES8311 被配置成四通道 TDM。
+     *
+     * 表中同时配置串行格式、单 DAC 输出通路以及参考程序保留的 ADC 状态。
+     * REG09=0x0C 的 bit7 为 0，明确选择左声道窗口；位宽为 16 bit、格式为
+     * Philips I2S。REG14=0x1A 使用模拟 PGA，并关闭数字麦克风输入。
      */
     static const es8311_register_value_t clock_and_signal_path[] = {
-        {ES8311_REG_SYSTEM_0D, 0x01},
-        {ES8311_REG_CLOCK_MANAGER_01, 0xBF},
-        {ES8311_REG_CLOCK_MANAGER_02, 0x18},
-        {ES8311_REG_CLOCK_MANAGER_05, 0x00},
-        {ES8311_REG_CLOCK_MANAGER_03, 0x10},
-        {ES8311_REG_CLOCK_MANAGER_04, 0x10},
-        {ES8311_REG_CLOCK_MANAGER_07, 0x00},
-        {ES8311_REG_CLOCK_MANAGER_08, 0xFF},
-        {ES8311_REG_CLOCK_MANAGER_06, 0x03},
-        {ES8311_REG_SDP_INPUT, 0x0C},
-        {ES8311_REG_SDP_OUTPUT, 0x0C},
-        {ES8311_REG_SYSTEM_14, 0x1A},
-        {ES8311_REG_SYSTEM_12, 0x00},
-        {ES8311_REG_SYSTEM_13, 0x10},
-        {ES8311_REG_SYSTEM_0E, 0x02},
-        {ES8311_REG_ADC_15, 0x40},
-        {ES8311_REG_ADC_1B, 0x0A},
-        {ES8311_REG_ADC_1C, 0x6A},
-        {ES8311_REG_DAC_37, 0x48},
-        {ES8311_REG_GPIO_44, 0x08},
-        {ES8311_REG_ADC_17, 0xBF},
-        {ES8311_REG_DAC_32, 0xBF},
+        {ES8311_REG_SYSTEM_0D, 0x01},          /* 启动系统工作电源状态。 */
+        {ES8311_REG_CLOCK_MANAGER_01, 0xBF},  /* 选择 BCLK 源并启用时钟。 */
+        {ES8311_REG_CLOCK_MANAGER_02, 0x18},  /* 预分频 x1、预倍频 x8。 */
+        {ES8311_REG_CLOCK_MANAGER_05, 0x00},  /* ADC/DAC 时钟分频均为 x1。 */
+        {ES8311_REG_CLOCK_MANAGER_03, 0x10},  /* ADC 单速模式、OSR=16。 */
+        {ES8311_REG_CLOCK_MANAGER_04, 0x10},  /* DAC OSR=16。 */
+        {ES8311_REG_CLOCK_MANAGER_07, 0x00},  /* 关闭三态，LRCK 分频高位。 */
+        {ES8311_REG_CLOCK_MANAGER_08, 0xFF},  /* LRCK 分频低位参考值。 */
+        {ES8311_REG_CLOCK_MANAGER_06, 0x03},  /* BCLK 正常极性及分频码。 */
+        {ES8311_REG_SDP_INPUT, 0x0C},         /* DAC：16 bit I2S，选择左窗口/slot0。 */
+        {ES8311_REG_SDP_OUTPUT, 0x0C},        /* ADC：16 bit Philips I2S。 */
+        {ES8311_REG_SYSTEM_14, 0x1A},         /* 使用模拟 PGA，关闭数字麦克风输入。 */
+        {ES8311_REG_SYSTEM_12, 0x00},         /* 打开 DAC 输出通路。 */
+        {ES8311_REG_SYSTEM_13, 0x10},         /* 配置模拟输出通路。 */
+        {ES8311_REG_SYSTEM_0E, 0x02},         /* 系统电源管理参考值。 */
+        {ES8311_REG_ADC_15, 0x40},            /* ADC 斜坡/检测参考值。 */
+        {ES8311_REG_ADC_1B, 0x0A},            /* ADC 高通滤波参考值 1。 */
+        {ES8311_REG_ADC_1C, 0x6A},            /* ADC 高通滤波参考值 2。 */
+        {ES8311_REG_DAC_37, 0x48},            /* 配置 DAC 音量变化斜坡。 */
+        {ES8311_REG_GPIO_44, 0x08},           /* GPIO 使用正常工作功能。 */
+        {ES8311_REG_ADC_17, 0xBF},            /* ADC 数字音量参考值。 */
+        {ES8311_REG_DAC_32, 0xBF},            /* 临时 DAC 音量，随后改为 80%。 */
     };
 
     for (size_t i = 0;
@@ -305,7 +373,8 @@ esp_err_t es8311_init(void)
     }
     if (result == ESP_OK) {
         ESP_LOGI(TAG,
-                 "Codec ready: 16-bit stereo I2S slave, volume=%u%%",
+                 "Codec ready: 16-bit I2S slave, mono DAC uses left channel, "
+                 "volume=%u%%",
                  ES8311_DEFAULT_OUTPUT_VOLUME_PERCENT);
         return ESP_OK;
     }
@@ -322,27 +391,40 @@ init_failed:
  * @brief 设置 DAC 数字音量。
  *
  * 对外使用容易理解的 0~100 百分比，再按四舍五入映射到寄存器 0x32 的
- * 0x00~0xFF 范围。100% 对应 0xFF，当前上电默认值为 80%。
+ * 0x00~0xFF 范围：register = round(percent x 255 / 100)。该百分比是寄存器
+ * 刻度，不表示人耳听感线性；0% 也不替代硬件静音，需要完全静音时应调用
+ * es8311_set_mute(true)。当前上电默认值为 80%，即寄存器值 0xCC。
+ *
+ * @param percent DAC 音量百分比，有效范围 0~100。
+ * @return ESP_OK 设置成功；ESP_ERR_INVALID_STATE 表示尚未初始化；
+ *         ESP_ERR_INVALID_ARG 表示超过 100；其他值为 I2C 写入错误。
  */
 esp_err_t es8311_set_volume(uint8_t percent)
 {
     if (!s_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (percent > 100) {
+    if (percent > ES8311_VOLUME_PERCENT_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
 
     /* 加 50 后再除以 100，实现整数运算下的四舍五入。 */
     const uint8_t register_value =
-        (uint8_t)(((uint16_t)percent * 255U + 50U) / 100U);
+        (uint8_t)(((uint16_t)percent * ES8311_DAC_VOLUME_REGISTER_MAX +
+                   ES8311_VOLUME_PERCENT_MAX / 2U) /
+                  ES8311_VOLUME_PERCENT_MAX);
     return write_register(ES8311_REG_DAC_32, register_value);
 }
 
 /**
  * @brief 设置或解除 DAC 数字静音。
  *
- * 仅更新 DAC_REG31 的 0x60 位域，保留寄存器中与其他 DAC 功能相关的位。
+ * 仅通过读-改-写更新 DAC_REG31 的 0x60 位域，保留寄存器中与其他 DAC
+ * 功能相关的位。该接口不会停止 I2S 时钟、关闭 Codec 或控制外部功放。
+ *
+ * @param muted true 写入静音位；false 清除静音位并恢复声音输出。
+ * @return ESP_OK 设置成功；ESP_ERR_INVALID_STATE 表示尚未初始化；
+ *         其他值为 I2C 读取或写入错误。
  */
 esp_err_t es8311_set_mute(bool muted)
 {
@@ -351,6 +433,6 @@ esp_err_t es8311_set_mute(bool muted)
     }
 
     return update_register(ES8311_REG_DAC_31,
-                           0x60,
-                           muted ? 0x60 : 0x00);
+                           ES8311_DAC_MUTE_MASK,
+                           muted ? ES8311_DAC_MUTE_MASK : 0x00);
 }

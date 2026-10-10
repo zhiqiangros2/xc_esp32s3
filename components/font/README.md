@@ -45,8 +45,13 @@ SD 卡挂载到 ESP-IDF VFS 后，程序通过以下路径加载字体：
 CONFIG_LV_TXT_ENC_UTF8=y
 CONFIG_LV_USE_FREETYPE=y
 CONFIG_LV_FREETYPE_CACHE_FT_GLYPH_CNT=256
+CONFIG_LV_USE_CLIB_MALLOC=y
 ```
 
 当前字号为 18 px，256 个缓存字形的总体规模约为 128 KB。实际占用会随字符
-尺寸变化，不是固定的 128 KB。项目启用了 LVGL 自定义内存后端，FreeType 缓存
-节点、字体解析内存和字形位图都会从 PSRAM 分配。
+尺寸变化，不是固定的 128 KB。LVGL 使用 ESP-IDF 标准堆，不能使用默认的
+64 KiB 固定池，否则反复创建中文页面后会耗尽字体缓存节点空间。根据工程的
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384` 配置，16 KiB 及以上的 LVGL 分配
+会优先进入 PSRAM。FreeType 使用官方 `ftsystem.c` 和 ESP-IDF 默认
+`malloc/realloc/free`：小于等于 16 KiB 的分配优先使用内部 RAM，更大的分配
+优先使用 PSRAM；首选内存不足时由 ESP-IDF 堆分配器尝试另一类内存。

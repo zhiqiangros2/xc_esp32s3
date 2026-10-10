@@ -1,9 +1,11 @@
 #include "lvgl_test_page.h"
 
 #include "lvgl_music_page.h"
+#include "lvgl_record_page.h"
 
 static lv_obj_t *s_back_label;
 static lv_obj_t *s_music_label;
+static lv_obj_t *s_record_label;
 static lvgl_language_t s_language;
 static const lv_font_t *s_ui_font;
 
@@ -13,7 +15,24 @@ static void test_page_deleted(lv_event_t *event)
     if (lv_event_get_code(event) == LV_EVENT_DELETE) {
         s_back_label = NULL;
         s_music_label = NULL;
+        s_record_label = NULL;
         s_ui_font = NULL;
+    }
+}
+
+/** 点击时创建录音页面；关闭后返回测试页并销毁录音页面。 */
+static void record_button_clicked(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    lv_obj_t *test_page = lv_obj_get_screen(lv_event_get_target(event));
+    lv_obj_t *record_page = lvgl_record_page_create(test_page,
+                                                    s_language,
+                                                    s_ui_font);
+    if (record_page != NULL) {
+        lv_screen_load(record_page);
     }
 }
 
@@ -74,6 +93,11 @@ void lvgl_test_page_set_language(lvgl_language_t language,
         lv_obj_set_style_text_font(s_music_label, font, 0);
         lv_obj_center(s_music_label);
     }
+    if (s_record_label != NULL) {
+        lv_label_set_text(s_record_label, texts->record);
+        lv_obj_set_style_text_font(s_record_label, font, 0);
+        lv_obj_center(s_record_label);
+    }
 }
 
 lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
@@ -118,6 +142,22 @@ lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
                         NULL);
     s_music_label = lv_label_create(music_button);
     lv_obj_set_style_text_color(s_music_label, lv_color_hex(0xFFFFFF), 0);
+
+    /* 录音按钮按需创建独立页面；文件由后台任务写入 /sdcard/music。 */
+    lv_obj_t *record_button = lv_button_create(test_page);
+    lv_obj_set_size(record_button, 92, 44);
+    lv_obj_set_pos(record_button, 100, 0);
+    lv_obj_set_style_radius(record_button, 4, 0);
+    lv_obj_set_style_bg_color(record_button, lv_color_hex(0xC62828), 0);
+    lv_obj_set_style_bg_color(record_button,
+                              lv_color_hex(0x8E0000),
+                              LV_STATE_PRESSED);
+    lv_obj_add_event_cb(record_button,
+                        record_button_clicked,
+                        LV_EVENT_CLICKED,
+                        NULL);
+    s_record_label = lv_label_create(record_button);
+    lv_obj_set_style_text_color(s_record_label, lv_color_hex(0xFFFFFF), 0);
 
     /* 返回按钮紧贴测试页面右下角，文字在按钮内部保持居中。 */
     lv_obj_t *back_button = lv_button_create(test_page);
