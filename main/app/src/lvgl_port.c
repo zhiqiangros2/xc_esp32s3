@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lcd.h"
 #include "lvgl.h"
@@ -49,6 +50,12 @@ static TaskHandle_t lvgl_task_handle = NULL;
 /* LVGL 任务控制块和 32 KiB 栈均由静态存储提供，不在运行期申请或释放。 */
 static StaticTask_t lvgl_task_control_block;
 static StackType_t lvgl_task_stack[LVGL_TASK_STACK_SIZE];
+
+/*
+ * 串行化 LVGL 主任务和摄像头预览任务对 LVGL 对象树的访问。使用递归锁，
+ * 允许未来某个持锁的 LVGL 回调再调用需要同一把锁的端口辅助接口。
+ */
+static SemaphoreHandle_t lvgl_mutex = NULL;
 
 /* 代表 320x240 LCD 的 LVGL 显示设备对象。 */
 static lv_display_t *lvgl_display = NULL;
@@ -311,7 +318,9 @@ static void lvgl_task(void *argument)
          * 处理已到期的 LVGL 工作，并取得距离下一次处理建议等待的毫秒数。
          * 显示刷新回调会把当前缓冲区异步提交给 SPI DMA。
          */
+        xSemaphoreTakeRecursive(lvgl_mutex, portMAX_DELAY);
         uint32_t delay_ms = lv_timer_handler();
+        xSemaphoreGiveRecursive(lvgl_mutex);
 
         if (delay_ms < LVGL_TASK_MIN_DELAY_MS) {
             /* 返回值过小时至少等待 5 ms，防止任务持续空转占满 CPU。 */
@@ -336,12 +345,14 @@ static void lvgl_task(void *argument)
         }
 
         /* 处理刚收到的消息，并连续取出队列中已经到达的其余消息。 */
+        xSemaphoreTakeRecursive(lvgl_mutex, portMAX_DELAY);
         do {
             pending_touch_state = touch_state;
             pending_touch_state_valid = true;
             lv_indev_read(lvgl_touch_input);
             result = tp_receive_state(&touch_state, 0);
         } while (result == ESP_OK);
+        xSemaphoreGiveRecursive(lvgl_mutex);
 
         if (result != ESP_ERR_TIMEOUT) {
             ESP_LOGE(TAG,
@@ -373,6 +384,10 @@ static void lvgl_release_resources(void)
     if (lvgl_draw_buffer_1 != NULL) {
         board_spi_dma_free(lvgl_draw_buffer_1);
         lvgl_draw_buffer_1 = NULL;
+    }
+    if (lvgl_mutex != NULL) {
+        vSemaphoreDelete(lvgl_mutex);
+        lvgl_mutex = NULL;
     }
     last_touch_point.x = 0;
     last_touch_point.y = 0;
@@ -421,6 +436,16 @@ esp_err_t lvgl_port_init(void)
         lv_init();
         lv_tick_set_cb(lvgl_tick_get_ms);
         lvgl_core_initialized = true;
+    }
+
+    /*
+     * LVGL 主任务和摄像头页面后台任务共用这一把递归锁。页面尚未启动时
+     * 创建锁，可保证首个后台帧到达前同步设施已经完整可用。
+     */
+    lvgl_mutex = xSemaphoreCreateRecursiveMutex();
+    if (lvgl_mutex == NULL) {
+        lvgl_release_resources();
+        return ESP_ERR_NO_MEM;
     }
 
     /* 计算 320x240 个 RGB565 像素需要的缓冲区字节数，即 153600 字节。 */
@@ -529,4 +554,30 @@ esp_err_t lvgl_port_start(void)
               LCD_Y_RESOLUTION,
               (unsigned)LVGL_TASK_STACK_SIZE);
     return ESP_OK;
+}
+
+bool lvgl_port_lock(uint32_t timeout_ms)
+{
+    if (!lvgl_initialized || lvgl_mutex == NULL) {
+        return false;
+    }
+
+    TickType_t wait_ticks;
+    if (timeout_ms == LVGL_PORT_WAIT_FOREVER) {
+        wait_ticks = portMAX_DELAY;
+    } else {
+        wait_ticks = pdMS_TO_TICKS(timeout_ms);
+        if (timeout_ms != 0U && wait_ticks == 0) {
+            wait_ticks = 1;
+        }
+    }
+
+    return xSemaphoreTakeRecursive(lvgl_mutex, wait_ticks) == pdTRUE;
+}
+
+void lvgl_port_unlock(void)
+{
+    if (lvgl_mutex != NULL) {
+        xSemaphoreGiveRecursive(lvgl_mutex);
+    }
 }

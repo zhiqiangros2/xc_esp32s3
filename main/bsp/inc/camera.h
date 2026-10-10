@@ -1,7 +1,17 @@
 #ifndef BOARD_CAMERA_H
 #define BOARD_CAMERA_H
 
+#include <stddef.h>
+
 #include "esp_err.h"
+
+/** GC0308 当前固定输出的 QVGA 图像尺寸和一帧 RGB565 字节数。 */
+#define CAMERA_FRAME_WIDTH 320U
+#define CAMERA_FRAME_HEIGHT 240U
+#define CAMERA_RGB565_BYTES_PER_PIXEL 2U
+#define CAMERA_FRAME_BUFFER_SIZE \
+    (CAMERA_FRAME_WIDTH * CAMERA_FRAME_HEIGHT * \
+     CAMERA_RGB565_BYTES_PER_PIXEL)
 
 /**
  * @brief 初始化 BOX3 板载 GC0308 摄像头。
@@ -26,6 +36,29 @@
  * 识别或摄像头资源分配失败时返回对应错误码。
  */
 esp_err_t camera_init(void);
+
+/**
+ * @brief 阻塞等待一帧中断采集完成的 RGB565 图像，并复制到调用者缓冲区。
+ *
+ * @details `esp32-camera` 在 `camera_init()` 中已经建立 VSYNC/PCLK、GDMA
+ * 中断和内部帧队列。摄像头驱动的高优先级任务永久阻塞在中断事件队列上；
+ * VSYNC 和 DMA 完成中断到达后，驱动才组装一帧并放入帧缓冲队列。因此本
+ * 接口不是周期查询摄像头寄存器，也不需要应用层再安装 GPIO 中断。
+ *
+ * 本函数调用 `esp_camera_fb_get()` 阻塞等待驱动帧队列，然后校验图像必须是
+ * 320x240 RGB565，把 153600 字节复制到 destination，最后立即归还驱动帧
+ * 缓冲。调用者因此可以在函数返回后继续持有自己的图像副本，而不会被下一
+ * 次摄像头 DMA 覆盖。
+ *
+ * `esp_camera_fb_get()` 使用组件内部约 4 秒超时。等待期间当前任务休眠，
+ * 不占用 CPU；摄像头无帧或硬件异常时返回 ESP_FAIL。
+ *
+ * @param[out] destination 接收完整 RGB565 图像的缓冲区。
+ * @param[in] destination_size 缓冲区容量，至少为 CAMERA_FRAME_BUFFER_SIZE。
+ * @return ESP_OK 成功；参数、初始化状态、图像格式或取帧失败时返回错误码。
+ */
+esp_err_t camera_read_rgb565_frame(void *destination,
+                                    size_t destination_size);
 
 /**
  * @brief 采集一帧 GC0308 图像，并显示到整个 320x240 LCD。

@@ -24,6 +24,7 @@ idf_component_register(
         "app/src/lvgl_font.c"
         "app/src/lvgl_language.c"
         "app/src/lvgl_port.c"
+        "app/src/lvgl_camera_page.c"
         "app/src/lvgl_music_page.c"
         "app/src/lvgl_record_page.c"
         "app/src/lvgl_wav_manager_page.c"

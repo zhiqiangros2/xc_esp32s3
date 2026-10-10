@@ -1,5 +1,6 @@
 #include "lvgl_test_page.h"
 
+#include "lvgl_camera_page.h"
 #include "lvgl_music_page.h"
 #include "lvgl_record_page.h"
 #include "lvgl_wav_manager_page.h"
@@ -8,6 +9,7 @@ static lv_obj_t *s_back_label;
 static lv_obj_t *s_music_label;
 static lv_obj_t *s_record_label;
 static lv_obj_t *s_wav_manager_label;
+static lv_obj_t *s_camera_label;
 static lvgl_language_t s_language;
 static const lv_font_t *s_ui_font;
 
@@ -19,7 +21,24 @@ static void test_page_deleted(lv_event_t *event)
         s_music_label = NULL;
         s_record_label = NULL;
         s_wav_manager_label = NULL;
+        s_camera_label = NULL;
         s_ui_font = NULL;
+    }
+}
+
+/** 点击时创建摄像头预览页面；关闭后返回并销毁预览页。 */
+static void camera_button_clicked(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    lv_obj_t *test_page = lv_obj_get_screen(lv_event_get_target(event));
+    lv_obj_t *camera_page = lvgl_camera_page_create(test_page,
+                                                    s_language,
+                                                    s_ui_font);
+    if (camera_page != NULL) {
+        lv_screen_load(camera_page);
     }
 }
 
@@ -122,6 +141,11 @@ void lvgl_test_page_set_language(lvgl_language_t language,
         lv_obj_set_style_text_font(s_wav_manager_label, font, 0);
         lv_obj_center(s_wav_manager_label);
     }
+    if (s_camera_label != NULL) {
+        lv_label_set_text(s_camera_label, texts->camera);
+        lv_obj_set_style_text_font(s_camera_label, font, 0);
+        lv_obj_center(s_camera_label);
+    }
 }
 
 lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
@@ -200,6 +224,26 @@ lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
     lv_obj_set_style_text_color(s_wav_manager_label,
                                 lv_color_hex(0xFFFFFF),
                                 0);
+
+    /*
+     * 摄像头按钮只创建预览页面。GC0308 已在 main.c 初始化并保持中断采集；
+     * 页面打开时唤醒常驻显示任务，关闭后销毁页面并让任务重新阻塞。两块
+     * PSRAM 图像缓冲保留供下次直接复用，摄像头硬件也不会反初始化。
+     */
+    lv_obj_t *camera_button = lv_button_create(test_page);
+    lv_obj_set_size(camera_button, 92, 44);
+    lv_obj_set_pos(camera_button, 0, 52);
+    lv_obj_set_style_radius(camera_button, 4, 0);
+    lv_obj_set_style_bg_color(camera_button, lv_color_hex(0x5D4037), 0);
+    lv_obj_set_style_bg_color(camera_button,
+                              lv_color_hex(0x3E2723),
+                              LV_STATE_PRESSED);
+    lv_obj_add_event_cb(camera_button,
+                        camera_button_clicked,
+                        LV_EVENT_CLICKED,
+                        NULL);
+    s_camera_label = lv_label_create(camera_button);
+    lv_obj_set_style_text_color(s_camera_label, lv_color_hex(0xFFFFFF), 0);
 
     /* 返回按钮紧贴测试页面右下角，文字在按钮内部保持居中。 */
     lv_obj_t *back_button = lv_button_create(test_page);

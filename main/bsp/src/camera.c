@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "esp_camera.h"
 #include "esp_log.h"
@@ -162,6 +163,56 @@ esp_err_t camera_init(void)
     return ESP_OK;
 }
 
+esp_err_t camera_read_rgb565_frame(void *destination,
+                                   size_t destination_size)
+{
+    if (destination == NULL ||
+        destination_size < CAMERA_FRAME_BUFFER_SIZE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!camera_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /*
+     * esp_camera_fb_get() 内部不是轮询传感器：cam_task 永久阻塞等待由
+     * VSYNC/GDMA ISR 写入的事件，完成帧再经 frame_buffer_queue 唤醒这里。
+     * 没有新帧时，当前调用任务同样阻塞休眠，不消耗 CPU 时间片。
+     */
+    camera_fb_t *frame = esp_camera_fb_get();
+    if (frame == NULL) {
+        ESP_LOGE(TAG, "Timed out waiting for an interrupt-completed frame");
+        return ESP_FAIL;
+    }
+
+    /*
+     * 页面只接受初始化时约定的 QVGA RGB565。严格校验可以避免摄像头配置
+     * 意外变化后仍按 153600 字节解释缓冲区，造成越界或画面错行。
+     */
+    if (frame->format != PIXFORMAT_RGB565 ||
+        frame->width != CAMERA_FRAME_WIDTH ||
+        frame->height != CAMERA_FRAME_HEIGHT ||
+        frame->len < CAMERA_FRAME_BUFFER_SIZE) {
+        ESP_LOGE(TAG,
+                 "Invalid frame: format=%d, size=%ux%u, bytes=%u",
+                 frame->format,
+                 frame->width,
+                 frame->height,
+                 (unsigned)frame->len);
+        esp_camera_fb_return(frame);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    /*
+     * 驱动帧缓冲属于 esp32-camera，归还后会被下一帧 DMA 重用。先复制到
+     * 页面拥有的 PSRAM 缓冲，再归还，LVGL 后续重绘时就不会读到正在变化的
+     * 摄像头 DMA 数据。
+     */
+    memcpy(destination, frame->buf, CAMERA_FRAME_BUFFER_SIZE);
+    esp_camera_fb_return(frame);
+    return ESP_OK;
+}
+
 esp_err_t camera_test(void)
 {
     if (!camera_initialized) {
@@ -169,8 +220,29 @@ esp_err_t camera_test(void)
     }
 
     /*
-     * esp_camera_fb_get() 取得摄像头驱动拥有的帧缓冲区。当前帧显示完成前
-     * 不能调用 esp_camera_fb_return()，否则摄像头可能提前覆盖图像数据。
+     * esp_camera_fb_get() 返回的是 esp32-camera 驱动帧缓冲区的借用指针，
+     * 不是调用者新分配的内存：
+     *
+     *   esp_camera_fb_get()               驱动把一块完整帧缓冲借给本函数
+     *          |
+     *          v
+     *   frame->buf 可读                   所有权仍属于摄像头驱动
+     *          |
+     *          v
+     *   lcd_draw_rgb565_bytes() 返回      同步 LCD 传输已经读完 frame->buf
+     *          |
+     *          v
+     *   esp_camera_fb_return(frame)        把缓冲归还给摄像头驱动复用
+     *
+     * get 与 return 之间，驱动保证 frame、frame->buf、宽高和长度保持有效；
+     * 调用者只能读取，不应释放或修改它们。即使配置了两个摄像头帧缓冲，也
+     * 不能在 LCD 尚未读完时提前 return：归还表示“本函数不再使用该内存”，
+     * 驱动随后可以让下一帧 DMA 覆盖它，屏幕就可能出现撕裂、花屏或混合帧。
+     *
+     * 当前 camera_test() 使用同步 lcd_draw_rgb565_bytes()，所以必须等该函数
+     * 返回后再归还。LVGL 预览路径不长时间占用驱动帧缓冲，而是在
+     * camera_read_rgb565_frame() 中先复制到页面自己的 PSRAM 双缓冲，复制
+     * 完成后即可 return；之后 LVGL 只读取副本，与摄像头 DMA 不再共享内存。
      */
     camera_fb_t *frame = esp_camera_fb_get();
     if (frame == NULL) {

@@ -84,6 +84,12 @@ void app_main(void)
 
     ESP_ERROR_CHECK(tp_init());
 
+    /*
+     * 初始化 GC0308、两块驱动帧缓冲以及 VSYNC/PCLK/GDMA 中断。摄像头页面
+     * 是否打开只决定是否取出完整帧交给 LVGL 显示；关闭页面不会反初始化
+     * 摄像头，底层中断仍保留。CAMERA_GRAB_WHEN_EMPTY 在无人取帧且两块驱动
+     * 缓冲均已占用时不会覆盖旧帧，重新打开页面后再继续流式采集。
+     */
     esp_err_t camera_result = camera_init();
     if (camera_result != ESP_OK) {
         ESP_LOGW(TAG,
@@ -194,85 +200,7 @@ void app_main(void)
     /* 启动“你好小鑫”唤醒、中文命令识别和红灯控制任务。 */
     ESP_ERROR_CHECK(speech_recognition_init());
 
-#if 0
-    /*
-     * LVGL 接入前使用的直接 LCD 绘图示例保留在本代码块中。当前 #if 0
-     * 表示关闭直接 LCD 测试，让程序继续执行后面的 LVGL 初始化。
-     */
-
-    /*
-     * 旧版 LCD 八色测试图代码保留在这里。LVGL 接管屏幕时必须关闭，避免
-     * LVGL 刷新任务和直接 LCD 绘图同时修改画面。
-     */
-    ESP_ERROR_CHECK(lcd_show_test_pattern());
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    uint32_t seconds = 0;
-    char uptime_text[40];
-    while (true) {
-
-        ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_GREEN));
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        /*
-         * 每次刷新前清除屏幕顶部一整行。标准坐标中 width 沿 X 轴水平
-         * 向右，所以宽度使用 320；height 沿 Y 轴竖直向下，所以高度为 16。
-         */
-        esp_err_t display_result = lcd_fill_rect(0,
-                                                  0,
-                                                  LCD_X_RESOLUTION,
-                                                  16,
-                                                  LCD_COLOR_WHITE);
-
-        if (display_result == ESP_OK) {
-
-            snprintf(uptime_text,sizeof(uptime_text),
-                "Hello World - uptime: %u s",
-                (unsigned)seconds);
-            /* 在 Y=0 的第一行中，从左向右显示运行时间。 */
-            display_result = lcd_show_string(0,
-                                             0,
-                                             16,
-                                             uptime_text,
-                                             LCD_COLOR_BLACK);
-        }
-        if (display_result == ESP_OK) {
-            /* 在 Y=20 的第二行中，从屏幕左侧显示 xc_lcd。 */
-            display_result = lcd_show_string(0,
-                                             20,
-                                             16,
-                                             "xc_lcd",
-                                             LCD_COLOR_BLACK);
-        }
-        if (display_result == ESP_OK) {
-            /* 在 Y=40 的第三行左侧显示单个字符 A。 */
-            display_result = lcd_show_char(0,
-                                           40,
-                                           'A',
-                                           16,
-                                           LCD_COLOR_BLACK);
-        }
-        if (display_result != ESP_OK) {
-            ESP_LOGE(TAG,
-                     "Failed to update LCD content: %s",
-                     esp_err_to_name(display_result));
-        }
-
-        seconds += 1;
-        vTaskDelay(pdMS_TO_TICKS(1000));
-
-        #if 1
-        /* 摄像头初始化或上一帧显示成功时，才继续读取下一帧。 */
-        if (camera_result == ESP_OK) {
-            /* 显示一帧 320x240 的 GC0308 图像。 */
-            camera_result = camera_test();
-
-            /* 相机图像在 LCD 上保留 1 秒，再进入下一轮文字显示。 */
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-        #endif
-    }
-
-#else
+#if 1
 
     /*
      * 将 LCD 显示和 CHSC5432 触摸接入 LVGL，然后创建按钮界面。LCD、
@@ -354,6 +282,80 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
+#else
+
+    /*
+     * 旧版 LCD 八色测试图代码保留在这里。LVGL 接管屏幕时必须关闭，避免
+     * LVGL 刷新任务和直接 LCD 绘图同时修改画面。
+     */
+    ESP_ERROR_CHECK(lcd_show_test_pattern());
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    uint32_t seconds = 0;
+    char uptime_text[40];
+    while (true) {
+
+        ESP_ERROR_CHECK(lcd_clear(LCD_COLOR_GREEN));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        /*
+         * 每次刷新前清除屏幕顶部一整行。标准坐标中 width 沿 X 轴水平
+         * 向右，所以宽度使用 320；height 沿 Y 轴竖直向下，所以高度为 16。
+         */
+        esp_err_t display_result = lcd_fill_rect(0,
+                                                  0,
+                                                  LCD_X_RESOLUTION,
+                                                  16,
+                                                  LCD_COLOR_WHITE);
+
+        if (display_result == ESP_OK) {
+
+            snprintf(uptime_text,sizeof(uptime_text),
+                "Hello World - uptime: %u s",
+                (unsigned)seconds);
+            /* 在 Y=0 的第一行中，从左向右显示运行时间。 */
+            display_result = lcd_show_string(0,
+                                             0,
+                                             16,
+                                             uptime_text,
+                                             LCD_COLOR_BLACK);
+        }
+        if (display_result == ESP_OK) {
+            /* 在 Y=20 的第二行中，从屏幕左侧显示 xc_lcd。 */
+            display_result = lcd_show_string(0,
+                                             20,
+                                             16,
+                                             "xc_lcd",
+                                             LCD_COLOR_BLACK);
+        }
+        if (display_result == ESP_OK) {
+            /* 在 Y=40 的第三行左侧显示单个字符 A。 */
+            display_result = lcd_show_char(0,
+                                           40,
+                                           'A',
+                                           16,
+                                           LCD_COLOR_BLACK);
+        }
+        if (display_result != ESP_OK) {
+            ESP_LOGE(TAG,
+                     "Failed to update LCD content: %s",
+                     esp_err_to_name(display_result));
+        }
+
+        seconds += 1;
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        #if 1
+        /* 摄像头初始化或上一帧显示成功时，才继续读取下一帧。 */
+        if (camera_result == ESP_OK) {
+            /* 显示一帧 320x240 的 GC0308 图像。 */
+            camera_result = camera_test();
+
+            /* 相机图像在 LCD 上保留 1 秒，再进入下一轮文字显示。 */
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        #endif
+    }
+    
 #endif
 
 }

@@ -31,6 +31,9 @@ typedef struct {
     const char *record_stopping;
     const char *record_saved;
     const char *record_error;
+    const char *camera;
+    const char *camera_waiting;
+    const char *camera_error;
     const char *wav_manager;
     const char *wav_delete;
     const char *wav_select_file;
