@@ -495,7 +495,7 @@ esp_err_t tp_interrupt_process(void)
      */
     if (state.point_count == 0) {
         if (previous_point_count != 0) {
-            ESP_LOGI(TAG, "Touch released");
+            //ESP_LOGI(TAG, "Touch released");
         }
     } else {
         #if 0

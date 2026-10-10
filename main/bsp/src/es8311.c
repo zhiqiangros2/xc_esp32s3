@@ -76,9 +76,9 @@
 #define ES8311_I2C_FREQUENCY_HZ 100000
 /* 每次 I2C 事务最多等待 100 ms，防止总线异常时永久阻塞播放任务。 */
 #define ES8311_I2C_TIMEOUT_MS 100
-/* 读写失败各自最多尝试 3 次，处理上电初期或共享总线上的瞬时错误。 */
-#define ES8311_I2C_READ_MAX_ATTEMPTS 3
-#define ES8311_I2C_WRITE_MAX_ATTEMPTS 3
+/* 读写失败各自最多尝试 5 次，处理上电初期或共享总线上的瞬时错误。 */
+#define ES8311_I2C_READ_MAX_ATTEMPTS 5
+#define ES8311_I2C_WRITE_MAX_ATTEMPTS 5
 /* I2C 重试及初始化表相邻寄存器写入之间的统一稳定时间，单位毫秒。 */
 #define ES8311_I2C_DELAY_MS 10
 /* 写入复位控制后，等待内部时钟、状态机和模拟电路稳定的时间。 */

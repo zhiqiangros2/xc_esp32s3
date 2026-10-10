@@ -4,7 +4,7 @@
  *
  * 寄存器配置和时钟系数来自正点原子 21_recoding(ES7210) 例程，并按本工程
  * 的共享 I2C 接口重新实现。与参考代码相比，本驱动会检查全部参数和每次
- * I2C 操作；通信失败最多尝试 3 次，不会无限阻塞录音任务。
+ * I2C 操作；通信失败最多尝试 5 次，不会无限阻塞录音任务。
  *
  * 从 ES7210 一侧观察，数字音频和模拟输入关系如下：
  *
@@ -103,8 +103,8 @@
 #define ES7210_I2C_ADDRESS 0x40U
 #define ES7210_I2C_FREQUENCY_HZ 100000U
 #define ES7210_I2C_TIMEOUT_MS 100
-/* 首次操作加两次重试，总尝试次数固定为 3。 */
-#define ES7210_I2C_MAX_ATTEMPTS 3U
+/* 首次操作加四次重试，总尝试次数固定为 5。 */
+#define ES7210_I2C_MAX_ATTEMPTS 5U
 /* 同时作为失败重试间隔和连续寄存器写入后的稳定时间。 */
 #define ES7210_I2C_DELAY_MS 10U
 
@@ -219,7 +219,7 @@ static const char *TAG = "ES7210";
  * @brief 通过 I2C 写入一个 ES7210 寄存器。
  *
  * I2C 发送内容固定为两个字节：[寄存器地址, 寄存器值]。一次首次发送加
- * 两次重试，总共最多 3 次；只有前两次失败后才等待 10 ms，第三次失败
+ * 四次重试，总共最多 5 次；只有前四次失败后才等待 10 ms，第五次失败
  * 立即把错误返回上层，不像参考程序那样永久循环。
  *
  * @param address 目标寄存器地址。
@@ -236,7 +236,7 @@ static esp_err_t write_register(uint8_t address, uint8_t value)
     /* ES7210 的写事务不需要单独发送数据长度或校验字节。 */
     const uint8_t data[] = {address, value};
     esp_err_t result = ESP_FAIL;
-    /* attempt 的取值为 1、2、3，因此不会出现无限重试。 */
+    /* attempt 的取值为 1 到 5，因此不会出现无限重试。 */
     for (unsigned int attempt = 1;
          attempt <= ES7210_I2C_MAX_ATTEMPTS;
          ++attempt) {
@@ -273,7 +273,7 @@ static esp_err_t write_register(uint8_t address, uint8_t value)
  *
  * board_i2c_transmit_receive() 在同一事务中先发送寄存器地址，再用重复
  * START 读取 1 字节，避免两次独立事务之间被其他 I2C 设备插入。
- * 读取同样最多尝试 3 次，value 只在返回 ESP_OK 时有效。
+ * 读取同样最多尝试 5 次，value 只在返回 ESP_OK 时有效。
  *
  * @param address 目标寄存器地址。
  * @param value 返回读取到的 8 bit 寄存器值。

@@ -639,10 +639,12 @@ esp_err_t speech_recognition_init(void)
      * 创建 AFE 配置。
      *
      * 输入格式 "MR" 明确告诉 AFE：每个 16 kHz 交错帧的第一通道 M 是近端
-     * MIC1，第二通道 R 是 MIC3 播放参考。下面分别打开 AEC、NS、VAD、AGC
-     * 和 WakeNet；AFE 内部用 R 从 M 中抑制设备自身播放声，再对近端语音做
-     * 降噪、活动检测和增益控制，fetch() 返回增强后的单声道 PCM 与唤醒状态。
-     * MultiNet 不属于 AFE，只有唤醒后才消费 fetch() 的单声道结果。
+     * MIC1，第二通道 R 是 MIC3 播放参考。AEC 用 R 从 M 中抑制设备自身的
+     * 播放声；随后由 VAD 判断是否存在语音，AGC 调整语音幅度，WakeNet 检测
+     * 唤醒词。这里关闭 WebRTC NS：ESP-SR 会提示 NS 可能改变唤醒词的频谱
+     * 特征并降低识别率。关闭 NS 不会关闭 AEC，MIC3 播放参考仍然有效。
+     * fetch() 最终返回处理后的单声道 PCM 和唤醒状态。MultiNet 不属于 AFE，
+     * 只有唤醒后才消费 fetch() 的单声道结果。
      *
      * 更多模型内存放入 PSRAM，保留内部 RAM 给 I2S DMA、任务栈和 AFE 输入。
      */
@@ -654,12 +656,12 @@ esp_err_t speech_recognition_init(void)
         result = ESP_ERR_NO_MEM;
         goto failed;
     }
-    afe_config->aec_init = true;
-    afe_config->se_init = false;
-    afe_config->ns_init = true;
-    afe_config->vad_init = true;
-    afe_config->agc_init = true;
-    afe_config->wakenet_init = true;
+    afe_config->aec_init = true;     /* 使用 MIC3 参考信号消除播放回声。 */
+    afe_config->se_init = false;     /* 不启用独立的语音增强处理级。 */
+    afe_config->ns_init = false;     /* 关闭降噪，避免降低唤醒和命令识别率。 */
+    afe_config->vad_init = true;     /* 检测当前音频块中是否存在语音。 */
+    afe_config->agc_init = true;     /* 自动调整近端语音的输出幅度。 */
+    afe_config->wakenet_init = true; /* 在 AFE 内运行“你好小鑫”唤醒模型。 */
     afe_config->wakenet_model_name = wakenet_model;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
 
