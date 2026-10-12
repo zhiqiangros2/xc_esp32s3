@@ -2,9 +2,9 @@
  * @file lvgl_wav_manager_page.c
  * @brief /sdcard/music 目录下 WAV 文件的选择和删除页面。
  *
- * 页面只在创建和删除成功后扫描目录。创建函数返回前已经完成首次扫描，因此
- * 调用者加载页面时可以直接显示文件列表；关闭根对象后，文件按钮、按钮上下文
- * 和页面上下文会随 LVGL 对象树一起释放。
+ * 页面先完成固定控件的首帧绘制，再由 LVGL 定时器逐项扫描目录和创建文件按钮，
+ * 避免文件较多时阻塞页面切换。删除成功后以相同方式重新扫描；关闭根对象时会
+ * 停止扫描、关闭目录，并释放文件按钮和页面上下文。
  */
 #include "lvgl_wav_manager_page.h"
 
@@ -22,6 +22,8 @@
 
 #define WAV_MANAGER_DIRECTORY SD_MOUNT_POINT "/music"
 #define WAV_MANAGER_PATH_MAX 384U
+/* 每次回调只读取一个目录项，让 LVGL 有机会及时处理绘制和触摸事件。 */
+#define WAV_MANAGER_SCAN_INTERVAL_MS 5U
 
 typedef struct {
     lv_obj_t *page;
@@ -30,8 +32,17 @@ typedef struct {
     lv_obj_t *status_label;
     lv_obj_t *delete_button;
     lv_obj_t *selected_button;
+    /* 增量扫描使用的定时器、目录句柄及“加载中”提示。 */
+    lv_timer_t *scan_timer;
+    DIR *directory;
+    lv_obj_t *scan_label;
     lvgl_language_t language;
     const lv_font_t *ui_font;
+    /* 一次扫描的状态；删除后重新扫描时全部复位。 */
+    bool scan_started;
+    bool initial_scan_requested;
+    size_t file_count;
+    const char *completed_message;
     char selected_path[WAV_MANAGER_PATH_MAX];
 } wav_manager_page_context_t;
 
@@ -40,12 +51,6 @@ typedef struct {
     lv_obj_t *button;
     char path[WAV_MANAGER_PATH_MAX];
 } wav_manager_file_context_t;
-
-/* 扫描期间保存文件名；关闭目录后才创建 LVGL 控件。 */
-typedef struct wav_manager_file_entry {
-    struct wav_manager_file_entry *next;
-    char name[];
-} wav_manager_file_entry_t;
 
 static const char *TAG = "WAV_MANAGER";
 
@@ -180,117 +185,135 @@ static bool add_file_button(wav_manager_page_context_t *context,
     return true;
 }
 
-/** 把提示文字放入空列表区域。 */
-static void add_list_message(wav_manager_page_context_t *context,
-                             const char *message)
+/** 把提示文字放入空列表区域，并返回标签供扫描结束时更新或删除。 */
+static lv_obj_t *add_list_message(wav_manager_page_context_t *context,
+                                  const char *message)
 {
     lv_obj_t *label = lv_label_create(context->list);
     lv_obj_set_width(label, LV_PCT(100));
     lv_label_set_text(label, message);
     lv_obj_set_style_text_font(label, interface_font(context), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    return label;
 }
 
 /**
- * 先完整扫描目录并复制文件名，关闭目录后再创建文件按钮。
+ * 每次定时器回调只处理一个目录项。
  *
- * 额外使用 stat() 排除名称以 .wav 结尾的目录；路径过长或内存分配失败的
- * 条目会被跳过，不会产生截断路径供删除操作使用。
+ * 第一次回调打开目录；后续回调各执行一次 readdir()，并使用 stat() 排除
+ * 名称以 .wav 结尾的目录。找到普通 WAV 文件时立即创建按钮。扫描结束后关闭
+ * 目录并删除定时器，因此文件数量只影响列表逐渐填充的时间，不再阻塞首帧。
  */
-static size_t populate_file_list(wav_manager_page_context_t *context,
-                                 bool *directory_opened)
+static void scan_file_list(lv_timer_t *timer)
 {
-    *directory_opened = false;
-    DIR *directory = opendir(WAV_MANAGER_DIRECTORY);
-    if (directory == NULL) {
-        const lvgl_language_texts_t *texts =
-            lvgl_language_get_texts(context->language);
-        add_list_message(context, texts->music_directory_error);
-        return 0;
-    }
-    *directory_opened = true;
-
-    wav_manager_file_entry_t *file_list = NULL;
-    wav_manager_file_entry_t *file_list_tail = NULL;
-    struct dirent *entry;
-    while ((entry = readdir(directory)) != NULL) {
-        if (!is_wav_file(entry->d_name)) {
-            continue;
-        }
-
-        char path[WAV_MANAGER_PATH_MAX];
-        const int path_length = snprintf(path,
-                                         sizeof(path),
-                                         "%s/%s",
-                                         WAV_MANAGER_DIRECTORY,
-                                         entry->d_name);
-        if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
-            continue;
-        }
-
-        struct stat file_status;
-        if (stat(path, &file_status) != 0 || !S_ISREG(file_status.st_mode)) {
-            continue;
-        }
-
-        const size_t name_length = strlen(entry->d_name);
-        wav_manager_file_entry_t *file =
-            malloc(sizeof(*file) + name_length + 1U);
-        if (file == NULL) {
-            continue;
-        }
-        file->next = NULL;
-        memcpy(file->name, entry->d_name, name_length + 1U);
-
-        if (file_list_tail == NULL) {
-            file_list = file;
-        } else {
-            file_list_tail->next = file;
-        }
-        file_list_tail = file;
-    }
-    closedir(directory);
-
-    size_t count = 0;
-    while (file_list != NULL) {
-        wav_manager_file_entry_t *file = file_list;
-        file_list = file->next;
-        if (add_file_button(context, file->name)) {
-            ++count;
-        }
-        free(file);
-    }
-
-    if (count == 0) {
-        const lvgl_language_texts_t *texts =
-            lvgl_language_get_texts(context->language);
-        add_list_message(context, texts->music_empty);
-    }
-    return count;
-}
-
-/** 清空旧文件项，重新扫描目录，并更新状态行。 */
-static void rebuild_file_list(wav_manager_page_context_t *context,
-                              const char *completed_message)
-{
-    clear_selection(context);
-    lv_obj_clean(context->list);
-
-    bool directory_opened = false;
-    const size_t file_count =
-        populate_file_list(context, &directory_opened);
+    wav_manager_page_context_t *context = lv_timer_get_user_data(timer);
     const lvgl_language_texts_t *texts =
         lvgl_language_get_texts(context->language);
 
-    if (!directory_opened) {
+    if (!context->scan_started) {
+        context->scan_started = true;
+        context->directory = opendir(WAV_MANAGER_DIRECTORY);
+        if (context->directory == NULL) {
+            lv_label_set_text(context->scan_label,
+                              texts->music_directory_error);
+            lv_label_set_text(context->status_label,
+                              texts->music_directory_error);
+            lv_timer_delete(timer);
+            context->scan_timer = NULL;
+        }
+        return;
+    }
+
+    struct dirent *entry = readdir(context->directory);
+    if (entry == NULL) {
+        closedir(context->directory);
+        context->directory = NULL;
+
+        if (context->file_count == 0) {
+            lv_label_set_text(context->scan_label, texts->music_empty);
+        } else if (context->scan_label != NULL) {
+            lv_obj_delete(context->scan_label);
+            context->scan_label = NULL;
+        }
+
+        if (context->completed_message != NULL) {
+            lv_label_set_text(context->status_label,
+                              context->completed_message);
+        } else if (context->file_count == 0) {
+            lv_label_set_text(context->status_label, texts->music_empty);
+        } else {
+            lv_label_set_text(context->status_label,
+                              texts->wav_select_file);
+        }
+        context->completed_message = NULL;
+        lv_timer_delete(timer);
+        context->scan_timer = NULL;
+        return;
+    }
+
+    if (!is_wav_file(entry->d_name)) {
+        return;
+    }
+
+    char path[WAV_MANAGER_PATH_MAX];
+    const int path_length = snprintf(path,
+                                     sizeof(path),
+                                     "%s/%s",
+                                     WAV_MANAGER_DIRECTORY,
+                                     entry->d_name);
+    if (path_length < 0 || (size_t)path_length >= sizeof(path)) {
+        return;
+    }
+
+    struct stat file_status;
+    if (stat(path, &file_status) != 0 || !S_ISREG(file_status.st_mode) ||
+        !add_file_button(context, entry->d_name)) {
+        return;
+    }
+
+    ++context->file_count;
+    if (context->scan_label != NULL) {
+        lv_obj_delete(context->scan_label);
+        context->scan_label = NULL;
+    }
+}
+
+/**
+ * 清空旧文件项并启动一次新的增量扫描。
+ *
+ * completed_message 用于删除成功后的最终状态；首次进入页面时传 NULL，扫描完成
+ * 后状态行恢复为“请选择文件”或“目录为空”。
+ */
+static void start_file_scan(wav_manager_page_context_t *context,
+                            const char *completed_message)
+{
+    if (context->scan_timer != NULL) {
+        lv_timer_delete(context->scan_timer);
+        context->scan_timer = NULL;
+    }
+    if (context->directory != NULL) {
+        closedir(context->directory);
+        context->directory = NULL;
+    }
+
+    clear_selection(context);
+    lv_obj_clean(context->list);
+    const lvgl_language_texts_t *texts =
+        lvgl_language_get_texts(context->language);
+    context->scan_started = false;
+    context->file_count = 0;
+    context->completed_message = completed_message;
+    context->scan_label = add_list_message(context, texts->music_loading);
+    lv_label_set_text(context->status_label,
+                      completed_message != NULL ? completed_message
+                                                : texts->music_loading);
+    context->scan_timer = lv_timer_create(scan_file_list,
+                                          WAV_MANAGER_SCAN_INTERVAL_MS,
+                                          context);
+    if (context->scan_timer == NULL) {
+        lv_label_set_text(context->scan_label, texts->music_directory_error);
         lv_label_set_text(context->status_label,
                           texts->music_directory_error);
-    } else if (completed_message != NULL) {
-        lv_label_set_text(context->status_label, completed_message);
-    } else if (file_count == 0) {
-        lv_label_set_text(context->status_label, texts->music_empty);
-    } else {
-        lv_label_set_text(context->status_label, texts->wav_select_file);
     }
 }
 
@@ -317,7 +340,7 @@ static void delete_button_clicked(lv_event_t *event)
         return;
     }
 
-    rebuild_file_list(context, texts->wav_delete_success);
+    start_file_scan(context, texts->wav_delete_success);
 }
 
 /** 返回测试页，并在本次事件分发结束后销毁管理页面。 */
@@ -332,10 +355,43 @@ static void close_button_clicked(lv_event_t *event)
     lv_obj_delete_async(context->page);
 }
 
-/** 根对象删除时释放页面上下文；文件上下文由各按钮删除事件释放。 */
+/** 页面首帧绘制完成后才启动首次扫描，让固定界面先响应显示。 */
+static void manager_page_drawn(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_DRAW_POST) {
+        return;
+    }
+
+    wav_manager_page_context_t *context = lv_event_get_user_data(event);
+    if (!context->initial_scan_requested) {
+        context->initial_scan_requested = true;
+        context->scan_timer = lv_timer_create(scan_file_list,
+                                               WAV_MANAGER_SCAN_INTERVAL_MS,
+                                               context);
+        if (context->scan_timer == NULL) {
+            const lvgl_language_texts_t *texts =
+                lvgl_language_get_texts(context->language);
+            lv_label_set_text(context->scan_label,
+                              texts->music_directory_error);
+            lv_label_set_text(context->status_label,
+                              texts->music_directory_error);
+        }
+    }
+}
+
+/** 根对象删除时停止扫描并释放页面上下文；文件上下文由按钮删除事件释放。 */
 static void manager_page_deleted(lv_event_t *event)
 {
-    free(lv_event_get_user_data(event));
+    wav_manager_page_context_t *context = lv_event_get_user_data(event);
+    if (context->scan_timer != NULL) {
+        lv_timer_delete(context->scan_timer);
+        context->scan_timer = NULL;
+    }
+    if (context->directory != NULL) {
+        closedir(context->directory);
+        context->directory = NULL;
+    }
+    free(context);
 }
 
 lv_obj_t *lvgl_wav_manager_page_create(lv_obj_t *return_page,
@@ -363,6 +419,10 @@ lv_obj_t *lvgl_wav_manager_page_create(lv_obj_t *return_page,
     lv_obj_add_event_cb(page,
                         manager_page_deleted,
                         LV_EVENT_DELETE,
+                        context);
+    lv_obj_add_event_cb(page,
+                        manager_page_drawn,
+                        LV_EVENT_DRAW_POST,
                         context);
     lv_obj_set_style_bg_color(page, lv_color_hex(0xF4F6F8), 0);
     lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
@@ -424,7 +484,8 @@ lv_obj_t *lvgl_wav_manager_page_create(lv_obj_t *return_page,
     lv_obj_set_style_pad_row(context->list, 4, 0);
     lv_obj_set_flex_flow(context->list, LV_FLEX_FLOW_COLUMN);
 
-    /* 调用者尚未加载页面；这里完成扫描后，首次显示就是完整文件列表。 */
-    rebuild_file_list(context, NULL);
+    /* 首帧先显示固定控件；DRAW_POST 回调再启动逐项目录扫描。 */
+    lv_label_set_text(context->status_label, texts->music_loading);
+    context->scan_label = add_list_message(context, texts->music_loading);
     return page;
 }

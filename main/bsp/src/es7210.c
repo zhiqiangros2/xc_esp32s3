@@ -106,7 +106,7 @@
 /* 首次操作加四次重试，总尝试次数固定为 5。 */
 #define ES7210_I2C_MAX_ATTEMPTS 5U
 /* 同时作为失败重试间隔和连续寄存器写入后的稳定时间。 */
-#define ES7210_I2C_DELAY_MS 10U
+#define ES7210_I2C_DELAY_MS 5U
 
 /* 板级默认录音参数直接复用公共 I2S 采样率，防止播放、录音配置不一致。 */
 #define ES7210_DEFAULT_SAMPLE_RATE_HZ AUDIO_I2S_SAMPLE_RATE_HZ

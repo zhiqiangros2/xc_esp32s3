@@ -2,9 +2,9 @@
  * @file lvgl_music_page.c
  * @brief SD 卡 WAV 文件列表和播放控制页面。
  *
- * 本文件只运行在 LVGL 任务上下文中：创建控件、扫描 /sdcard/music、响应
- * 点击并定时刷新播放状态。耗时的 WAV 解析、文件读取和 I2S 写入全部由
- * wav_player.c 的后台任务执行，因此按钮回调不会长时间阻塞界面刷新。
+ * 本文件只运行在 LVGL 任务上下文中。页面先完成切换，再通过 LVGL 定时器
+ * 每次读取一个 /sdcard/music 目录项，使大目录扫描不会阻塞首次画面显示。
+ * WAV 解析、文件读取和 I2S 写入仍由 wav_player.c 的后台任务执行。
  *
  * 内存归属：页面拥有 music_page_context_t；每个曲目按钮分别拥有一个
  * music_track_context_t。对象收到 LV_EVENT_DELETE 时释放对应上下文。
@@ -26,6 +26,8 @@
 #define MUSIC_PATH_MAX 384
 /* 每 250 ms 拉取一次后台状态；兼顾界面响应和 LVGL 任务开销。 */
 #define MUSIC_STATUS_UPDATE_MS 250
+/* 每次扫描一个目录项，5 ms 后继续，让 LVGL 有机会处理绘制和触摸。 */
+#define MUSIC_SCAN_INTERVAL_MS 5
 
 /* 音乐页面整个生命周期共享的 UI 状态。 */
 typedef struct {
@@ -37,6 +39,17 @@ typedef struct {
     lv_obj_t *status_label;
     /* 周期读取 wav_player_status_t 的 LVGL 定时器。 */
     lv_timer_t *status_timer;
+    /* 页面显示后逐项扫描 SD 音乐目录的 LVGL 定时器。 */
+    lv_timer_t *scan_timer;
+    /* 正在扫描的 FATFS 目录，扫描结束或页面关闭时必须 closedir()。 */
+    DIR *music_directory;
+    /* 曲目按钮的父对象及扫描期间显示的“加载中”标签。 */
+    lv_obj_t *track_list;
+    lv_obj_t *scan_label;
+    /* 防止页面后续重绘时再次打开目录。 */
+    bool scan_started;
+    /* 已经成功创建的曲目按钮数量。 */
+    size_t track_count;
     /* 创建页面时固定的界面语言。 */
     lvgl_language_t language;
     /* 可选中文字体；为 NULL 时回退到 LV_FONT_DEFAULT。 */
@@ -54,15 +67,6 @@ typedef struct {
     /* 点击时直接提交给播放器的完整文件路径。 */
     char path[MUSIC_PATH_MAX];
 } music_track_context_t;
-
-/*
- * 扫描阶段使用的临时文件名节点。先把 FATFS 返回的 d_name 复制到这些节点，
- * 关闭目录后再创建 LVGL 控件，避免目录遍历和界面对象创建交叉进行。
- */
-typedef struct music_file_entry {
-    struct music_file_entry *next;
-    char name[];
-} music_file_entry_t;
 
 /** 根据页面语言选择字体；中文优先使用调用者传入的完整字库。 */
 static const lv_font_t *interface_font(const music_page_context_t *context)
@@ -157,15 +161,23 @@ static void status_timer_elapsed(lv_timer_t *timer)
 /**
  * @brief 页面根对象删除回调。
  *
- * 先删除状态定时器，保证释放 context 后不会再有定时回调访问它；曲目按钮的
- * 上下文由各自的 LV_EVENT_DELETE 回调随子对象删除过程分别释放。
+ * 先删除两个定时器并关闭尚未扫描完的目录，保证释放 context 后不会再有
+ * 回调或 FATFS 句柄访问它。曲目按钮上下文由各自的删除事件释放。
  */
 static void music_page_deleted(lv_event_t *event)
 {
     music_page_context_t *context = lv_event_get_user_data(event);
+    if (context->scan_timer != NULL) {
+        lv_timer_delete(context->scan_timer);
+        context->scan_timer = NULL;
+    }
     if (context->status_timer != NULL) {
         lv_timer_delete(context->status_timer);
         context->status_timer = NULL;
+    }
+    if (context->music_directory != NULL) {
+        closedir(context->music_directory);
+        context->music_directory = NULL;
     }
     free(context);
 }
@@ -310,88 +322,76 @@ static bool add_track_button(lv_obj_t *list,
 }
 
 /**
- * @brief 先扫描音乐目录，再为内存中的 WAV 文件名创建按钮。
+ * @brief 每次定时器回调只处理一个目录项。
  *
- * 本函数严格分成两个阶段：
- *
- * 1. 打开 /sdcard/music，只扫描 .wav 目录项并把文件名复制到临时链表；
- * 2. 关闭目录，确保 FATFS 扫描结束后，再依次创建文件按钮和文字标签。
- *
- * 因此 LVGL 不会在 readdir() 尚未结束时构建文件列表。目录无法打开时显示
- * 目录错误；没有扫描到 WAV，或所有按钮均创建失败时显示空目录提示。
+ * 第一次回调打开目录，后续回调各执行一次 readdir()。发现 WAV 时立即创建
+ * 对应按钮；扫描完成后关闭目录并删除本定时器。整个过程不使用临时文件名
+ * 链表，也不会在页面创建函数中一次性遍历完整目录。
  */
-static size_t populate_music_list(lv_obj_t *list,
-                                  music_page_context_t *context)
+static void scan_music_directory(lv_timer_t *timer)
 {
-    DIR *directory = opendir(MUSIC_DIRECTORY);
-    if (directory == NULL) {
-        const lvgl_language_texts_t *texts =
-            lvgl_language_get_texts(context->language);
-        lv_obj_t *label = lv_label_create(list);
-        lv_label_set_text(label, texts->music_directory_error);
-        lv_obj_set_style_text_font(label, interface_font(context), 0);
-        return 0;
+    music_page_context_t *context = lv_timer_get_user_data(timer);
+    const lvgl_language_texts_t *texts =
+        lvgl_language_get_texts(context->language);
+
+    if (!context->scan_started) {
+        context->scan_started = true;
+        context->music_directory = opendir(MUSIC_DIRECTORY);
+        if (context->music_directory == NULL) {
+            lv_label_set_text(context->scan_label,
+                              texts->music_directory_error);
+            lv_timer_delete(timer);
+            context->scan_timer = NULL;
+        }
+        return;
     }
 
-    music_file_entry_t *file_list = NULL;
-    music_file_entry_t *file_list_tail = NULL;
-    struct dirent *entry;
+    struct dirent *entry = readdir(context->music_directory);
+    if (entry == NULL) {
+        closedir(context->music_directory);
+        context->music_directory = NULL;
 
-    /*
-     * 第一阶段只访问 SD/FATFS。dirent 中的 d_name 会在下一次 readdir() 时
-     * 失效，所以必须为每个文件名分配独立内存，不能保存 d_name 指针。
-     * FATFS 返回顺序即后续显示顺序；当前不额外排序，也不进入子目录。
-     */
-    while ((entry = readdir(directory)) != NULL) {
-        if (!is_wav_file(entry->d_name)) {
-            continue;
+        if (context->track_count == 0) {
+            lv_label_set_text(context->scan_label, texts->music_empty);
+        } else if (context->scan_label != NULL) {
+            lv_obj_delete(context->scan_label);
+            context->scan_label = NULL;
         }
 
-        const size_t name_length = strlen(entry->d_name);
-        music_file_entry_t *file =
-            malloc(sizeof(*file) + name_length + 1U);
-        if (file == NULL) {
-            /* 保留已经扫描到的文件；关闭目录后仍可显示这部分列表。 */
-            continue;
-        }
-        file->next = NULL;
-        memcpy(file->name, entry->d_name, name_length + 1U);
-
-        if (file_list_tail == NULL) {
-            file_list = file;
-        } else {
-            file_list_tail->next = file;
-        }
-        file_list_tail = file;
+        lv_timer_delete(timer);
+        context->scan_timer = NULL;
+        return;
     }
 
-    /* 第二阶段开始前必须先结束目录访问。 */
-    closedir(directory);
-
-    size_t count = 0;
-    while (file_list != NULL) {
-        music_file_entry_t *file = file_list;
-        file_list = file->next;
-
-        if (add_track_button(list, context, file->name)) {
-            ++count;
-        }
-        /* 按钮内部已经复制完整路径，临时扫描节点可以立即释放。 */
-        free(file);
+    if (!is_wav_file(entry->d_name) ||
+        !add_track_button(context->track_list, context, entry->d_name)) {
+        return;
     }
 
-    if (count == 0) {
-        const lvgl_language_texts_t *texts =
-            lvgl_language_get_texts(context->language);
-        lv_obj_t *label = lv_label_create(list);
-        lv_label_set_text(label, texts->music_empty);
-        lv_obj_set_style_text_font(label, interface_font(context), 0);
+    ++context->track_count;
+    if (context->scan_label != NULL) {
+        lv_obj_delete(context->scan_label);
+        context->scan_label = NULL;
     }
-    return count;
+}
+
+/** 页面首帧绘制完成后才启动目录扫描，保证固定界面先显示出来。 */
+static void music_page_drawn(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_DRAW_POST) {
+        return;
+    }
+
+    music_page_context_t *context = lv_event_get_user_data(event);
+    if (context->scan_timer == NULL && !context->scan_started) {
+        context->scan_timer = lv_timer_create(scan_music_directory,
+                                               MUSIC_SCAN_INTERVAL_MS,
+                                               context);
+    }
 }
 
 /**
- * @brief 创建完整音乐页面并扫描 SD 卡曲目。
+ * @brief 创建音乐页面；页面显示后再逐项扫描 SD 卡曲目。
  *
  * 页面布局固定适配 320x240：顶部标题和操作按钮，中部一行状态，底部为可滚动
  * 曲目列表。创建成功后页面尚未自动加载，由调用者决定何时切换到该对象。
@@ -430,6 +430,10 @@ lv_obj_t *lvgl_music_page_create(lv_obj_t *return_page,
     lv_obj_add_event_cb(page,
                         music_page_deleted,
                         LV_EVENT_DELETE,
+                        context);
+    lv_obj_add_event_cb(page,
+                        music_page_drawn,
+                        LV_EVENT_DRAW_POST,
                         context);
     lv_obj_set_style_bg_color(page, lv_color_hex(0xF4F6F8), 0);
     lv_obj_set_style_bg_opa(page, LV_OPA_COVER, 0);
@@ -482,16 +486,20 @@ lv_obj_t *lvgl_music_page_create(lv_obj_t *return_page,
                                0);
 
     /* 下方列表使用纵向 Flex，超过可视高度后由 LVGL 提供滚动。 */
-    lv_obj_t *list = lv_obj_create(page);
-    lv_obj_set_pos(list, 0, 70);
-    lv_obj_set_size(list, 320, 170);
-    lv_obj_set_style_radius(list, 0, 0);
-    lv_obj_set_style_border_width(list, 0, 0);
-    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(list, 4, 0);
-    lv_obj_set_style_pad_row(list, 4, 0);
-    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-    (void)populate_music_list(list, context);
+    context->track_list = lv_obj_create(page);
+    lv_obj_set_pos(context->track_list, 0, 70);
+    lv_obj_set_size(context->track_list, 320, 170);
+    lv_obj_set_style_radius(context->track_list, 0, 0);
+    lv_obj_set_style_border_width(context->track_list, 0, 0);
+    lv_obj_set_style_bg_opa(context->track_list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(context->track_list, 4, 0);
+    lv_obj_set_style_pad_row(context->track_list, 4, 0);
+    lv_obj_set_flex_flow(context->track_list, LV_FLEX_FLOW_COLUMN);
+
+    /* 页面先显示加载提示；首帧绘制完成后再启动逐项目录扫描。 */
+    context->scan_label = lv_label_create(context->track_list);
+    lv_label_set_text(context->scan_label, texts->music_loading);
+    lv_obj_set_style_text_font(context->scan_label, font, 0);
 
     /* 先显示当前播放器状态，再创建周期同步定时器。 */
     update_status_label(context);

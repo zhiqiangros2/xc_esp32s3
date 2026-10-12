@@ -76,11 +76,10 @@
 #define ES8311_I2C_FREQUENCY_HZ 100000
 /* 每次 I2C 事务最多等待 100 ms，防止总线异常时永久阻塞播放任务。 */
 #define ES8311_I2C_TIMEOUT_MS 100
-/* 读写失败各自最多尝试 5 次，处理上电初期或共享总线上的瞬时错误。 */
-#define ES8311_I2C_READ_MAX_ATTEMPTS 5
-#define ES8311_I2C_WRITE_MAX_ATTEMPTS 5
+/* I2C 读写失败最多尝试 5 次，处理上电初期或共享总线上的瞬时错误。 */
+#define ES8311_I2C_MAX_ATTEMPTS 5
 /* I2C 重试及初始化表相邻寄存器写入之间的统一稳定时间，单位毫秒。 */
-#define ES8311_I2C_DELAY_MS 10
+#define ES8311_I2C_DELAY_MS 5
 /* 写入复位控制后，等待内部时钟、状态机和模拟电路稳定的时间。 */
 #define ES8311_RESET_SETTLE_DELAY_MS 100
 /* 上电初始化完成后设置 DAC 默认输出音量为 80%。 */
@@ -154,7 +153,7 @@ static esp_err_t write_register(uint8_t address, uint8_t value)
     esp_err_t result = ESP_FAIL;
 
     for (unsigned int attempt = 1;
-         attempt <= ES8311_I2C_WRITE_MAX_ATTEMPTS;
+         attempt <= ES8311_I2C_MAX_ATTEMPTS;
          ++attempt) {
         result = board_i2c_transmit(s_device,
                                     data,
@@ -164,13 +163,13 @@ static esp_err_t write_register(uint8_t address, uint8_t value)
             return ESP_OK;
         }
 
-        if (attempt < ES8311_I2C_WRITE_MAX_ATTEMPTS) {
+        if (attempt < ES8311_I2C_MAX_ATTEMPTS) {
             ESP_LOGW(TAG,
                      "Write register 0x%02X failed: %s; retry %u/%u",
                      address,
                      esp_err_to_name(result),
                      attempt + 1,
-                     ES8311_I2C_WRITE_MAX_ATTEMPTS);
+                     ES8311_I2C_MAX_ATTEMPTS);
             vTaskDelay(pdMS_TO_TICKS(ES8311_I2C_DELAY_MS));
         }
     }
@@ -178,7 +177,7 @@ static esp_err_t write_register(uint8_t address, uint8_t value)
     ESP_LOGE(TAG,
              "Write register 0x%02X failed after %u attempts: %s",
              address,
-             ES8311_I2C_WRITE_MAX_ATTEMPTS,
+             ES8311_I2C_MAX_ATTEMPTS,
              esp_err_to_name(result));
     return result;
 }
@@ -198,7 +197,7 @@ static esp_err_t read_register(uint8_t address, uint8_t *value)
     esp_err_t result = ESP_FAIL;
 
     for (unsigned int attempt = 1;
-         attempt <= ES8311_I2C_READ_MAX_ATTEMPTS;
+         attempt <= ES8311_I2C_MAX_ATTEMPTS;
          ++attempt) {
         result = board_i2c_transmit_receive(
             s_device,
@@ -211,13 +210,13 @@ static esp_err_t read_register(uint8_t address, uint8_t *value)
             return ESP_OK;
         }
 
-        if (attempt < ES8311_I2C_READ_MAX_ATTEMPTS) {
+        if (attempt < ES8311_I2C_MAX_ATTEMPTS) {
             ESP_LOGW(TAG,
                      "Read register 0x%02X failed: %s; retry %u/%u",
                      address,
                      esp_err_to_name(result),
                      attempt + 1,
-                     ES8311_I2C_READ_MAX_ATTEMPTS);
+                     ES8311_I2C_MAX_ATTEMPTS);
             vTaskDelay(pdMS_TO_TICKS(ES8311_I2C_DELAY_MS));
         }
     }
@@ -225,7 +224,7 @@ static esp_err_t read_register(uint8_t address, uint8_t *value)
     ESP_LOGE(TAG,
              "Read register 0x%02X failed after %u attempts: %s",
              address,
-             ES8311_I2C_READ_MAX_ATTEMPTS,
+             ES8311_I2C_MAX_ATTEMPTS,
              esp_err_to_name(result));
     return result;
 }

@@ -165,7 +165,7 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_i2s_init());
 
     /* 等待 I2S 时钟稳定后再配置依赖这些时钟工作的 ES8311。 */
-    vTaskDelay(pdMS_TO_TICKS(10));
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     /* 初始化 ES8311、设置 80% DAC 音量并解除数字静音。 */
     ESP_ERROR_CHECK(es8311_init());
