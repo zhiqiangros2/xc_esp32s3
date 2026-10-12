@@ -1,5 +1,6 @@
 #include "lvgl_test_page.h"
 
+#include "lvgl_bluetooth_page.h"
 #include "lvgl_camera_page.h"
 #include "lvgl_music_page.h"
 #include "lvgl_record_page.h"
@@ -17,6 +18,7 @@ typedef enum {
     TEST_PAGE_CONTROL_RECORD,
     TEST_PAGE_CONTROL_WAV_MANAGER,
     TEST_PAGE_CONTROL_CAMERA,
+    TEST_PAGE_CONTROL_BLUETOOTH,
     TEST_PAGE_CONTROL_BACK,
     TEST_PAGE_CONTROL_COMPLETE,
 } test_page_control_t;
@@ -28,6 +30,7 @@ static lv_obj_t *s_music_label;
 static lv_obj_t *s_record_label;
 static lv_obj_t *s_wav_manager_label;
 static lv_obj_t *s_camera_label;
+static lv_obj_t *s_bluetooth_label;
 static lv_timer_t *s_build_timer;
 static lvgl_language_t s_language;
 static const lv_font_t *s_ui_font;
@@ -52,9 +55,26 @@ static void test_page_deleted(lv_event_t *event)
         s_record_label = NULL;
         s_wav_manager_label = NULL;
         s_camera_label = NULL;
+        s_bluetooth_label = NULL;
         s_ui_font = NULL;
         s_next_control = TEST_PAGE_CONTROL_COMPLETE;
         s_build_started = false;
+    }
+}
+
+/** 点击时创建 BLE 设备页面；关闭页面不影响 BSP 常驻扫描。 */
+static void bluetooth_button_clicked(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    lv_obj_t *test_page = lv_obj_get_screen(lv_event_get_target(event));
+    lv_obj_t *bluetooth_page = lvgl_bluetooth_page_create(test_page,
+                                                          s_language,
+                                                          s_ui_font);
+    if (bluetooth_page != NULL) {
+        lv_screen_load(bluetooth_page);
     }
 }
 
@@ -195,12 +215,17 @@ void lvgl_test_page_set_language(lvgl_language_t language,
         lv_obj_set_style_text_font(s_camera_label, font, 0);
         lv_obj_center(s_camera_label);
     }
+    if (s_bluetooth_label != NULL) {
+        lv_label_set_text(s_bluetooth_label, texts->bluetooth);
+        lv_obj_set_style_text_font(s_bluetooth_label, font, 0);
+        lv_obj_center(s_bluetooth_label);
+    }
 }
 
 /**
  * 每次定时器回调只创建一个按钮及其标签。
  *
- * 中文 TTF 的新字形会在标签首次绘制时按需读取和生成。把五组控件拆到不同
+ * 中文 TTF 的新字形会在标签首次绘制时按需读取和生成。把六组控件拆到不同
  * LVGL 周期，可以让触摸、刷新和其他任务在两组控件之间继续运行，避免测试页
  * 首次打开时长时间停留在旧页面。
  */
@@ -309,6 +334,29 @@ static void create_next_control(lv_timer_t *timer)
                                         lv_color_hex(0xFFFFFF),
                                         0);
             lv_obj_center(s_camera_label);
+            s_next_control = TEST_PAGE_CONTROL_BLUETOOTH;
+            break;
+
+        case TEST_PAGE_CONTROL_BLUETOOTH:
+            button = lv_button_create(s_test_page);
+            lv_obj_set_size(button, 112, 44);
+            lv_obj_set_pos(button, 100, 52);
+            lv_obj_set_style_radius(button, 4, 0);
+            lv_obj_set_style_bg_color(button, lv_color_hex(0x00695C), 0);
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(0x004D40),
+                                      LV_STATE_PRESSED);
+            lv_obj_add_event_cb(button,
+                                bluetooth_button_clicked,
+                                LV_EVENT_CLICKED,
+                                NULL);
+            s_bluetooth_label = lv_label_create(button);
+            lv_label_set_text(s_bluetooth_label, texts->bluetooth);
+            lv_obj_set_style_text_font(s_bluetooth_label, font, 0);
+            lv_obj_set_style_text_color(s_bluetooth_label,
+                                        lv_color_hex(0xFFFFFF),
+                                        0);
+            lv_obj_center(s_bluetooth_label);
             s_next_control = TEST_PAGE_CONTROL_BACK;
             break;
 
@@ -385,8 +433,8 @@ lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
 
     /*
      * 创建函数到这里立即返回。调用者加载屏幕后先得到完整背景，DRAW_POST
-     * 回调随后启动定时器，按音乐、录音、WAV 管理、摄像头、返回的顺序逐个
-     * 创建控件，避免所有中文 TTF 字形集中在同一个首帧内生成。
+     * 回调随后启动定时器，按音乐、录音、WAV 管理、摄像头、蓝牙、返回的顺序
+     * 逐个创建控件，避免所有中文 TTF 字形集中在同一个首帧内生成。
      */
     return test_page;
 }

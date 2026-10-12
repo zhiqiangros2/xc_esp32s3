@@ -84,6 +84,7 @@
 #include "esp_mn_speech_commands.h"
 #include "esp_wn_models.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/queue.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
@@ -117,7 +118,11 @@ _Static_assert(AUDIO_I2S_SAMPLE_RATE_HZ == SPEECH_AFE_SAMPLE_RATE_HZ,
 #define SPEECH_STREAM_BUFFER_SIZE (128U * 1024U)
 
 /*
- * 三个常驻任务的栈大小和优先级。ESP32-S3 的 ESP-IDF 任务栈单位是字节。
+ * 三个常驻任务的栈大小和优先级。ESP32-S3 的 ESP-IDF 任务栈单位是字节，
+ * 三个栈合计 6144 + 8192 + 3072 = 17408 字节。栈通过 WithCaps 接口明确
+ * 分配到 PSRAM，把片内 RAM 留给只能使用内部存储器的 I2S DMA、驱动控制块
+ * 和 ESP-SR 小块内存。任务控制块仍由 FreeRTOS 分配在片内 RAM。
+ *
  * Feed 与 Detect 都是持续音频处理，使用相同优先级 5；Action 只执行低频
  * I2C 灯控，优先级 4 即可。初始化时 Feed 固定在 CPU0，Detect 固定在 CPU1，
  * 避免 AFE feed/fetch 的持续计算集中到同一核心；Action 由调度器选择核心。
@@ -489,15 +494,15 @@ static void cleanup_initialization(void)
         s_callback_registered = false;
     }
     if (s_action_task != NULL) {
-        vTaskDelete(s_action_task);
+        vTaskDeleteWithCaps(s_action_task);
         s_action_task = NULL;
     }
     if (s_detect_task != NULL) {
-        vTaskDelete(s_detect_task);
+        vTaskDeleteWithCaps(s_detect_task);
         s_detect_task = NULL;
     }
     if (s_feed_task != NULL) {
-        vTaskDelete(s_feed_task);
+        vTaskDeleteWithCaps(s_feed_task);
         s_feed_task = NULL;
     }
     if (s_action_queue != NULL) {
@@ -786,30 +791,38 @@ esp_err_t speech_recognition_init(void)
      * Feed 固定 CPU0：从 StreamBuffer 取数据并写入 AFE。
      * Detect 固定 CPU1：从 AFE fetch 并运行 WakeNet/MultiNet 状态机。
      * Action 不绑核：低频执行 AW9523B I2C 操作。
+     * 三个任务的栈均明确放入 PSRAM；WithCaps 创建的任务必须由
+     * vTaskDeleteWithCaps() 删除，不能使用普通 vTaskDelete() 回收。
      *
      * || 具有短路特性：任何一个创建失败都会停止创建后续任务；cleanup 会根据
      * 非空 TaskHandle 删除此前已经成功创建的任务。
      */
-    if (xTaskCreatePinnedToCore(speech_feed_task,
-                                "speech_feed",
-                                SPEECH_FEED_TASK_STACK_SIZE,
-                                NULL,
-                                SPEECH_FEED_TASK_PRIORITY,
-                                &s_feed_task,
-                                0) != pdPASS ||
-        xTaskCreatePinnedToCore(speech_detect_task,
-                                "speech_detect",
-                                SPEECH_DETECT_TASK_STACK_SIZE,
-                                NULL,
-                                SPEECH_DETECT_TASK_PRIORITY,
-                                &s_detect_task,
-                                1) != pdPASS ||
-        xTaskCreate(speech_action_task,
-                    "speech_action",
-                    SPEECH_ACTION_TASK_STACK_SIZE,
-                    NULL,
-                    SPEECH_ACTION_TASK_PRIORITY,
-                    &s_action_task) != pdPASS) {
+    if (xTaskCreatePinnedToCoreWithCaps(
+            speech_feed_task,
+            "speech_feed",
+            SPEECH_FEED_TASK_STACK_SIZE,
+            NULL,
+            SPEECH_FEED_TASK_PRIORITY,
+            &s_feed_task,
+            0,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS ||
+        xTaskCreatePinnedToCoreWithCaps(
+            speech_detect_task,
+            "speech_detect",
+            SPEECH_DETECT_TASK_STACK_SIZE,
+            NULL,
+            SPEECH_DETECT_TASK_PRIORITY,
+            &s_detect_task,
+            1,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS ||
+        xTaskCreateWithCaps(speech_action_task,
+                            "speech_action",
+                            SPEECH_ACTION_TASK_STACK_SIZE,
+                            NULL,
+                            SPEECH_ACTION_TASK_PRIORITY,
+                            &s_action_task,
+                            MALLOC_CAP_SPIRAM |
+                                MALLOC_CAP_8BIT) != pdPASS) {
         result = ESP_ERR_NO_MEM;
         goto failed;
     }

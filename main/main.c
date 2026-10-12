@@ -5,6 +5,7 @@
 #include "audio_i2s.h"
 #include "audio_recorder.h"
 #include "aw9523b.h"
+#include "ble_scanner.h"
 #include "bsp_info.h"
 #include "camera.h"
 #include "display.h"
@@ -33,7 +34,7 @@ static const char *TAG = "BOX3";
 
 void app_main(void)
 {
-    //vTaskDelay(pdMS_TO_TICKS(10000));
+    vTaskDelay(pdMS_TO_TICKS(10000));
 
     /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
     esp_err_t err = nvs_flash_init();
@@ -46,6 +47,18 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     bsp_info_print();
+
+    /*
+     * ESP32-S3 只支持 BLE。启动 NimBLE Observer 常驻主动扫描，设备名称、MAC
+     * 和 RSSI 由 BSP 保存；LVGL 页面是否打开不会启停扫描。初始化失败时保留
+     * 其他功能，蓝牙页面会显示扫描服务不可用。
+     */
+    const esp_err_t ble_result = ble_scanner_init();
+    if (ble_result != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "BLE scanner unavailable; continuing without BLE: %s",
+                 esp_err_to_name(ble_result));
+    }
 
     /* 全局 GPIO ISR 服务只安装一次，供后续 GPIO0 和 GPIO42 中断共同使用。 */
     ESP_ERROR_CHECK(board_gpio_isr_service_init());

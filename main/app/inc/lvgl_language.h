@@ -34,6 +34,12 @@ typedef struct {
     const char *camera;
     const char *camera_waiting;
     const char *camera_error;
+    const char *bluetooth;
+    const char *ble_scanning;
+    const char *ble_devices;
+    const char *ble_no_devices;
+    const char *ble_unnamed;
+    const char *ble_error;
     const char *wav_manager;
     const char *wav_delete;
     const char *wav_select_file;

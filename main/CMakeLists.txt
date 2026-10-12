@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "bsp/src/bsp_info.c"
+        "bsp/src/ble_scanner.c"
         "bsp/src/i2c.c"
         "bsp/src/gpio_isr_service.c"
         "bsp/src/interrupt_manager.c"
@@ -24,12 +25,13 @@ idf_component_register(
         "app/src/lvgl_font.c"
         "app/src/lvgl_language.c"
         "app/src/lvgl_port.c"
+        "app/src/lvgl_bluetooth_page.c"
         "app/src/lvgl_camera_page.c"
         "app/src/lvgl_music_page.c"
         "app/src/lvgl_record_page.c"
         "app/src/lvgl_wav_manager_page.c"
         "app/src/lvgl_test_page.c"
         "app/src/lvgl_ui.c"
-    PRIV_REQUIRES esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_sdspi esp_driver_spi esp_lcd esp_psram esp_system esp_timer espressif__esp32-camera espressif__esp-dsp espressif__esp-sr fatfs heap joltwallet__littlefs lvgl__lvgl nvs_flash sdmmc spi_flash wear_levelling
+    PRIV_REQUIRES bt esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_sdspi esp_driver_spi esp_lcd esp_psram esp_system esp_timer espressif__esp32-camera espressif__esp-dsp espressif__esp-sr fatfs heap joltwallet__littlefs lvgl__lvgl nvs_flash sdmmc spi_flash wear_levelling
     INCLUDE_DIRS "bsp/inc" "app/inc"
 )
