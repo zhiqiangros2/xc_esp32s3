@@ -51,8 +51,10 @@ esp_err_t camera_init(void);
  * 调用者因此可以在函数返回后继续持有自己的图像副本，而不会被下一次摄像头
  * DMA 覆盖。
  *
- * `esp_camera_fb_get()` 使用组件内部约 4 秒超时。等待期间当前任务休眠，
- * 不占用 CPU；摄像头无帧或硬件异常时返回 ESP_FAIL。
+ * 每次调用会先启用 VSYNC/GDMA，取得完整帧后立即暂停采集。页面关闭及 LVGL
+ * 绘制期间不会产生无用的摄像头中断。`esp_camera_fb_get()` 使用组件内部约
+ * 4 秒超时；等待期间当前任务休眠，不占用 CPU，摄像头无帧或硬件异常时返回
+ * ESP_FAIL。
  *
  * @param[out] destination 接收完整 RGB565 图像的缓冲区。
  * @param[in] destination_size 缓冲区容量，至少为 CAMERA_FRAME_BUFFER_SIZE。

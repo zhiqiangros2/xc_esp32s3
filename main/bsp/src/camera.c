@@ -10,6 +10,14 @@
 #include "hal/i2c_types.h"
 #include "lcd.h"
 
+/*
+ * esp32-camera 2.0.15 的公开接口没有暂停采集函数，但其驱动层提供这两个
+ * 全局入口。BSP 只在本文件内使用它们：取帧前打开 VSYNC，取得完整帧后立即
+ * 关闭 VSYNC 和 GDMA。这样页面关闭或等待 LVGL 绘制期间不会持续产生中断。
+ */
+void cam_start(void);
+void cam_stop(void);
+
 /* GC0308 的 8 位 DVP 数据总线。D0~D7 必须与原理图的连线顺序一致。 */
 #define CAMERA_D0_GPIO GPIO_NUM_7
 #define CAMERA_D1_GPIO GPIO_NUM_8
@@ -93,6 +101,12 @@ esp_err_t camera_init(void)
                  esp_err_to_name(result));
         return result;
     }
+
+    /*
+     * esp_camera_init() 默认会立即打开 VSYNC。当前应用按需取帧，因此初始化
+     * 返回后马上暂停；后续 camera_read_rgb565_frame() 每次自行开启和关闭。
+     */
+    cam_stop();
 
     sensor_t *sensor = esp_camera_sensor_get();
     /* esp_camera_init() 成功后应该能够取得传感器控制对象。 */
@@ -181,11 +195,13 @@ esp_err_t camera_read_rgb565_frame(void *destination,
     }
 
     /*
-     * esp_camera_fb_get() 内部不是轮询传感器：cam_task 永久阻塞等待由
-     * VSYNC/GDMA ISR 写入的事件，完成帧再经 frame_buffer_queue 唤醒这里。
-     * 没有新帧时，当前调用任务同样阻塞休眠，不消耗 CPU 时间片。
+     * 每次只为本次请求打开 VSYNC/GDMA。esp_camera_fb_get() 内部不是轮询
+     * 传感器：cam_task 阻塞等待 ISR 事件，完整帧进入 frame_buffer_queue 后
+     * 才唤醒这里。取得帧时单个驱动缓冲已被借出，随后暂停采集不会截断帧。
      */
+    cam_start();
     camera_fb_t *frame = esp_camera_fb_get();
+    cam_stop();
     if (frame == NULL) {
         ESP_LOGE(TAG, "Timed out waiting for an interrupt-completed frame");
         return ESP_FAIL;
@@ -250,7 +266,9 @@ esp_err_t camera_test(void)
      * camera_read_rgb565_frame() 中先复制到页面自己的 PSRAM 双缓冲，复制
      * 完成后即可 return；之后 LVGL 只读取副本，与摄像头 DMA 不再共享内存。
      */
+    cam_start();
     camera_fb_t *frame = esp_camera_fb_get();
+    cam_stop();
     if (frame == NULL) {
         ESP_LOGE(TAG, "Failed to capture a camera frame");
         return ESP_FAIL;
