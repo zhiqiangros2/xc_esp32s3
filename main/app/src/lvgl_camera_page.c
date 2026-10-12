@@ -19,7 +19,8 @@
  *   预览任务切换到另一块缓冲，继续取帧
  *
  * 页面未打开时，预览任务永久阻塞在任务通知上，不轮询摄像头。摄像头驱动
- * 自己的 VSYNC/GDMA 中断和两块帧缓冲始终保留。
+ * 自己的 VSYNC/GDMA 中断资源和单个按需采集帧缓冲始终保留；只有页面请求
+ * 下一帧时才重新启动采集，避免 RGB565 连续流挤满驱动事件队列。
  */
 #include "lvgl_camera_page.h"
 
@@ -28,10 +29,10 @@
 #include <stdint.h>
 
 #include "camera.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "lvgl_port.h"
 
@@ -39,7 +40,8 @@
 
 /*
  * 预览任务栈放在 PSRAM，避免 ESP-SR、FreeType 和 LVGL 启动后片内堆不足。
- * ESP-IDF 的任务栈大小单位为字节，任务控制块仍由 FreeRTOS 放在片内 RAM。
+ * ESP-IDF 的任务栈大小单位为字节。TCB 使用静态内部对象，创建任务时完全
+ * 不申请运行期内部堆，因此即使页面打开较晚也不会因内部堆碎片而失败。
  */
 #define CAMERA_PAGE_TASK_STACK_SIZE 4096U
 /* 低于 LVGL 主任务，保证画面合成和触摸事件优先执行。 */
@@ -67,6 +69,11 @@ typedef struct {
 
 static const char *TAG = "CAMERA_PAGE";
 static camera_page_state_t s_camera_page;
+/* 调度器频繁访问 TCB，因此保留在内部 RAM。 */
+static StaticTask_t s_camera_task_control_block;
+/* 任务代码不执行 SD/SPI DMA 操作，4 KiB 栈可以安全放在外部 RAM。 */
+static EXT_RAM_BSS_ATTR StackType_t
+    s_camera_task_stack[CAMERA_PAGE_TASK_STACK_SIZE];
 
 /* preview_enabled 和 task_handle 会被 LVGL 任务与预览任务共同访问。 */
 static portMUX_TYPE s_camera_page_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -154,21 +161,20 @@ static esp_err_t prepare_preview_resources(void)
         return ESP_OK;
     }
 
-    const BaseType_t task_created = xTaskCreateWithCaps(
+    s_camera_page.task_handle = xTaskCreateStatic(
         camera_preview_task,
         "camera_preview",
         CAMERA_PAGE_TASK_STACK_SIZE,
         NULL,
         CAMERA_PAGE_TASK_PRIORITY,
-        &s_camera_page.task_handle,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (task_created == pdPASS) {
+        s_camera_task_stack,
+        &s_camera_task_control_block);
+    if (s_camera_page.task_handle != NULL) {
         return ESP_OK;
     }
 
-    s_camera_page.task_handle = NULL;
     ESP_LOGE(TAG,
-             "Cannot create preview task: stack=%u, "
+             "Cannot create static preview task: stack=%u, "
              "internal free/largest=%u/%u, PSRAM free/largest=%u/%u",
              (unsigned)CAMERA_PAGE_TASK_STACK_SIZE,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |

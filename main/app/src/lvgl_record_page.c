@@ -3,7 +3,8 @@
  * @brief ES7210 录音控制及状态页面。
  *
  * 所有控件只由 LVGL 任务访问。按钮向 audio_recorder 后台任务发送事件，
- * 200 ms 定时器读取状态快照；页面不执行 SD 或 I2S 阻塞操作。
+ * 200 ms 定时器读取状态快照；页面不执行 SD 或 I2S 阻塞操作。页面上下文显式
+ * 放在 PSRAM，关闭页面时随根对象一起释放。
  */
 #include "lvgl_record_page.h"
 
@@ -14,6 +15,7 @@
 #include <string.h>
 
 #include "audio_recorder.h"
+#include "esp_heap_caps.h"
 
 #define RECORD_STATUS_UPDATE_MS 200U
 
@@ -170,7 +172,7 @@ static void record_page_deleted(lv_event_t *event)
         context->status_timer = NULL;
     }
     (void)audio_recorder_stop();
-    free(context);
+    heap_caps_free(context);
 }
 
 static void start_button_clicked(lv_event_t *event)
@@ -231,7 +233,10 @@ lv_obj_t *lvgl_record_page_create(lv_obj_t *return_page,
         return NULL;
     }
 
-    record_page_context_t *context = calloc(1, sizeof(*context));
+    record_page_context_t *context = heap_caps_calloc(
+        1,
+        sizeof(*context),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (context == NULL) {
         return NULL;
     }
@@ -242,7 +247,7 @@ lv_obj_t *lvgl_record_page_create(lv_obj_t *return_page,
 
     lv_obj_t *page = lv_obj_create(NULL);
     if (page == NULL) {
-        free(context);
+        heap_caps_free(context);
         return NULL;
     }
     context->page = page;

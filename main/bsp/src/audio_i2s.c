@@ -104,6 +104,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2s_tdm.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -178,8 +179,11 @@ static SemaphoreHandle_t s_rx_mutex;
  * 4096 字节输入包含 4096 / (2声道 x 2字节) = 1024 个 [L,R] 帧；每帧
  * 插入两个 16 bit 填充槽后变成 8 字节，所以 TX 临时缓冲需要 8192 字节。
  * 数组元素是 int16_t，声明 4096 个元素正好等于 8192 字节，仅在 TX 锁内使用。
+ * i2s_channel_write() 会把这里的数据复制到 I2S 驱动拥有的内部 DMA 缓冲，
+ * 因此该格式转换区本身不要求 MALLOC_CAP_DMA，放入 PSRAM 可以保留内部 RAM。
  */
-static int16_t s_tx_tdm_buffer[AUDIO_I2S_STEREO_WRITE_CHUNK_SIZE];
+static EXT_RAM_BSS_ATTR int16_t
+    s_tx_tdm_buffer[AUDIO_I2S_STEREO_WRITE_CHUNK_SIZE];
 static const char *TAG = "AUDIO_I2S";
 
 /** 删除初始化阶段已经创建的互斥锁，并把句柄恢复为空。 */

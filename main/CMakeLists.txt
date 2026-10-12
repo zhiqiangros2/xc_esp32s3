@@ -24,6 +24,7 @@ idf_component_register(
         "bsp/src/tp.c"
         "app/src/lvgl_font.c"
         "app/src/lvgl_language.c"
+        "app/src/lvgl_memory.c"
         "app/src/lvgl_port.c"
         "app/src/lvgl_bluetooth_page.c"
         "app/src/lvgl_camera_page.c"
@@ -35,3 +36,7 @@ idf_component_register(
     PRIV_REQUIRES bt esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_sdspi esp_driver_spi esp_lcd esp_psram esp_system esp_timer espressif__esp32-camera espressif__esp-dsp espressif__esp-sr fatfs heap joltwallet__littlefs lvgl__lvgl nvs_flash sdmmc spi_flash wear_levelling
     INCLUDE_DIRS "bsp/inc" "app/inc"
 )
+
+# LVGL references its custom allocator from another static component. Force this
+# object into the final link regardless of component-library ordering.
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-u lv_mem_init")

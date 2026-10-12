@@ -37,6 +37,7 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -87,7 +88,11 @@ typedef struct {
 } ble_scanner_state_t;
 
 static const char *TAG = "BLE_SCANNER";
-static ble_scanner_state_t s_scanner;
+/*
+ * 设备表只由普通任务访问，并在临界区内复制，不参与 ISR 或 DMA；固定容量表放到
+ * PSRAM，避免 32 台设备的名称、地址和时间戳长期占用内部 RAM。同步锁仍在内部。
+ */
+static EXT_RAM_BSS_ATTR ble_scanner_state_t s_scanner;
 
 /* NimBLE 主机任务和其他调用任务会并发访问 s_scanner。 */
 static portMUX_TYPE s_scanner_lock = portMUX_INITIALIZER_UNLOCKED;

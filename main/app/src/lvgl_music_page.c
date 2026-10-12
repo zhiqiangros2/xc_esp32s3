@@ -7,7 +7,8 @@
  * WAV 解析、文件读取和 I2S 写入仍由 wav_player.c 的后台任务执行。
  *
  * 内存归属：页面拥有 music_page_context_t；每个曲目按钮分别拥有一个
- * music_track_context_t。对象收到 LV_EVENT_DELETE 时释放对应上下文。
+ * music_track_context_t。两类上下文都显式放在 PSRAM，对象收到
+ * LV_EVENT_DELETE 时释放，文件较多时不会持续消耗内部 RAM。
  */
 #include "lvgl_music_page.h"
 
@@ -17,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "sd_fatfs.h"
 #include "wav_player.h"
 
@@ -179,13 +181,13 @@ static void music_page_deleted(lv_event_t *event)
         closedir(context->music_directory);
         context->music_directory = NULL;
     }
-    free(context);
+    heap_caps_free(context);
 }
 
 /** 曲目按钮删除回调：释放 add_track_button() 为该按钮分配的上下文。 */
 static void track_context_deleted(lv_event_t *event)
 {
-    free(lv_event_get_user_data(event));
+    heap_caps_free(lv_event_get_user_data(event));
 }
 
 /**
@@ -267,7 +269,10 @@ static bool add_track_button(lv_obj_t *list,
                              music_page_context_t *page_context,
                              const char *file_name)
 {
-    music_track_context_t *track = calloc(1, sizeof(*track));
+    music_track_context_t *track = heap_caps_calloc(
+        1,
+        sizeof(*track),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (track == NULL) {
         return false;
     }
@@ -281,13 +286,13 @@ static bool add_track_button(lv_obj_t *list,
                                      file_name);
     if (path_length < 0 ||
         (size_t)path_length >= sizeof(track->path)) {
-        free(track);
+        heap_caps_free(track);
         return false;
     }
 
     lv_obj_t *button = lv_button_create(list);
     if (button == NULL) {
-        free(track);
+        heap_caps_free(track);
         return false;
     }
 
@@ -410,7 +415,10 @@ lv_obj_t *lvgl_music_page_create(lv_obj_t *return_page,
     }
 
     /* context 与页面同寿命，根对象删除回调负责释放。 */
-    music_page_context_t *context = calloc(1, sizeof(*context));
+    music_page_context_t *context = heap_caps_calloc(
+        1,
+        sizeof(*context),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (context == NULL) {
         return NULL;
     }
@@ -423,7 +431,7 @@ lv_obj_t *lvgl_music_page_create(lv_obj_t *return_page,
     /* parent=NULL 创建可作为 screen 加载的根对象。 */
     lv_obj_t *page = lv_obj_create(NULL);
     if (page == NULL) {
-        free(context);
+        heap_caps_free(context);
         return NULL;
     }
     context->page = page;

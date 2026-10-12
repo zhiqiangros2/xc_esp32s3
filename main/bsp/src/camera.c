@@ -69,8 +69,13 @@ static const camera_config_t camera_config = {
     .frame_size = FRAMESIZE_QVGA,
     /* RGB565 模式不使用 JPEG，此字段保留驱动示例的默认值。 */
     .jpeg_quality = 12,
-    /* 两个帧缓冲区允许摄像头采集与 LCD 显示交替进行。 */
-    .fb_count = 2,
+    /*
+     * RGB565 使用单个驱动帧缓冲，使 DVP/GDMA 按需采集一帧后暂停。若配置为
+     * 2 个或更多缓冲，esp32-camera 会进入连续采集模式；LVGL 等待绘制期间
+     * GC0308 仍持续产生 VSYNC/EOF，容易挤满驱动事件队列并形成残帧。
+     * 页面自己的两块显示缓冲与这里无关，仍可保证 LVGL 不读取 DMA 缓冲。
+     */
+    .fb_count = 1,
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
 };
@@ -159,7 +164,8 @@ esp_err_t camera_init(void)
 
     camera_initialized = true;
     ESP_LOGI(TAG,
-             "GC0308 ready: 320x240 RGB565, DVP 8-bit, 2 PSRAM frame buffers");
+             "GC0308 ready: 320x240 RGB565, DVP 8-bit, "
+             "1 on-demand PSRAM frame buffer");
     return ESP_OK;
 }
 
@@ -235,9 +241,9 @@ esp_err_t camera_test(void)
      *   esp_camera_fb_return(frame)        把缓冲归还给摄像头驱动复用
      *
      * get 与 return 之间，驱动保证 frame、frame->buf、宽高和长度保持有效；
-     * 调用者只能读取，不应释放或修改它们。即使配置了两个摄像头帧缓冲，也
-     * 不能在 LCD 尚未读完时提前 return：归还表示“本函数不再使用该内存”，
-     * 驱动随后可以让下一帧 DMA 覆盖它，屏幕就可能出现撕裂、花屏或混合帧。
+     * 调用者只能读取，不应释放或修改它们。不能在 LCD 尚未读完时提前
+     * return：归还表示“本函数不再使用该内存”，驱动随后可以让下一帧 DMA
+     * 覆盖它，屏幕就可能出现撕裂、花屏或混合帧。
      *
      * 当前 camera_test() 使用同步 lcd_draw_rgb565_bytes()，所以必须等该函数
      * 返回后再归还。LVGL 预览路径不长时间占用驱动帧缓冲，而是在

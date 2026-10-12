@@ -19,6 +19,12 @@
 #define AW9523B_I2C_ADDRESS 0x59
 #define AW9523B_I2C_FREQUENCY_HZ 400000
 #define AW9523B_I2C_TIMEOUT_MS 100
+/*
+ * 公共 I2C 层遇到 ESP_ERR_INVALID_STATE 时会先复位控制器，但不会隐藏失败。
+ * AW9523B 在这里最多重发 5 次，防止上电后的第一次事务偶发失败导致整机重启。
+ */
+#define AW9523B_I2C_MAX_ATTEMPTS 5U
+#define AW9523B_I2C_RETRY_DELAY_MS 5U
 #define AW9523B_INTERRUPT_DEBOUNCE_MS 20
 #define AW9523B_CAMERA_POWER_STABILIZE_DELAY_MS 50U
 #define AW9523B_BOARD_POWER_STABILIZE_DELAY_MS 100U
@@ -60,26 +66,79 @@ static TickType_t last_key_change_ticks[AW9523B_PINS_PER_PORT] = {0};
 static bool aw9523b_interrupt_initialized = false;
 static bool box3_camera_powered = false;
 
-/** 不加互斥锁的底层寄存器读操作，仅供驱动内部调用。 */
-static esp_err_t read_register_unlocked(uint8_t register_address, uint8_t *value)
+/**
+ * 不加 AW9523B 互斥锁地读取一个或多个连续寄存器，并有限次数重试。
+ * board_i2c_transmit_receive() 内部仍会取得整条 I2C0 总线锁，所以重试之间不会
+ * 与触摸屏或 Codec 事务重叠。调用者负责保证 data 和 data_size 有效。
+ */
+static esp_err_t read_registers_unlocked(uint8_t register_address,
+                                         uint8_t *data,
+                                         size_t data_size)
 {
-    return board_i2c_transmit_receive(aw9523b_device_handle,
-                                      &register_address,
-                                      sizeof(register_address),
-                                      value,
-                                      sizeof(*value),
-                                      AW9523B_I2C_TIMEOUT_MS);
+    esp_err_t result = ESP_FAIL;
+    for (unsigned int attempt = 1U;
+         attempt <= AW9523B_I2C_MAX_ATTEMPTS;
+         ++attempt) {
+        result = board_i2c_transmit_receive(aw9523b_device_handle,
+                                            &register_address,
+                                            sizeof(register_address),
+                                            data,
+                                            data_size,
+                                            AW9523B_I2C_TIMEOUT_MS);
+        if (result == ESP_OK) {
+            return ESP_OK;
+        }
+
+        if (attempt < AW9523B_I2C_MAX_ATTEMPTS) {
+            ESP_LOGW(TAG,
+                     "Read register 0x%02X failed: %s; retry %u/%u",
+                     register_address,
+                     esp_err_to_name(result),
+                     attempt + 1U,
+                     AW9523B_I2C_MAX_ATTEMPTS);
+            vTaskDelay(pdMS_TO_TICKS(AW9523B_I2C_RETRY_DELAY_MS));
+        }
+    }
+
+    return result;
 }
 
-/** 不加互斥锁的底层寄存器写操作，仅供驱动内部调用。 */
+/** 不加 AW9523B 互斥锁的单寄存器读操作，仅供驱动内部调用。 */
+static esp_err_t read_register_unlocked(uint8_t register_address,
+                                        uint8_t *value)
+{
+    return read_registers_unlocked(register_address, value, sizeof(*value));
+}
+
+/** 不加 AW9523B 互斥锁地写一个寄存器，并对瞬时总线错误有限次数重试。 */
 static esp_err_t write_register_unlocked(uint8_t register_address, uint8_t value)
 {
     const uint8_t write_data[] = {register_address, value};
+    esp_err_t result = ESP_FAIL;
 
-    return board_i2c_transmit(aw9523b_device_handle,
-                              write_data,
-                              sizeof(write_data),
-                              AW9523B_I2C_TIMEOUT_MS);
+    for (unsigned int attempt = 1U;
+         attempt <= AW9523B_I2C_MAX_ATTEMPTS;
+         ++attempt) {
+        result = board_i2c_transmit(aw9523b_device_handle,
+                                    write_data,
+                                    sizeof(write_data),
+                                    AW9523B_I2C_TIMEOUT_MS);
+        if (result == ESP_OK) {
+            return ESP_OK;
+        }
+
+        if (attempt < AW9523B_I2C_MAX_ATTEMPTS) {
+            ESP_LOGW(TAG,
+                     "Write register 0x%02X failed: %s; retry %u/%u",
+                     register_address,
+                     esp_err_to_name(result),
+                     attempt + 1U,
+                     AW9523B_I2C_MAX_ATTEMPTS);
+            vTaskDelay(pdMS_TO_TICKS(AW9523B_I2C_RETRY_DELAY_MS));
+        }
+    }
+
+    return result;
 }
 
 /** 不加互斥锁，一次读取 P0 和 P1 的 16 位输入状态。 */
@@ -88,12 +147,9 @@ static esp_err_t read_all_inputs_unlocked(uint16_t *input_levels)
     const uint8_t register_address = AW9523B_REG_INPUT_PORT0_0x00;
     uint8_t input_data[2] = {0};
 
-    esp_err_t result = board_i2c_transmit_receive(aw9523b_device_handle,
-                                                   &register_address,
-                                                   sizeof(register_address),
-                                                   input_data,
-                                                   sizeof(input_data),
-                                                   AW9523B_I2C_TIMEOUT_MS);
+    esp_err_t result = read_registers_unlocked(register_address,
+                                                input_data,
+                                                sizeof(input_data));
     if (result == ESP_OK) {
         *input_levels = (uint16_t)input_data[0] |
                         ((uint16_t)input_data[1] << 8);

@@ -55,6 +55,7 @@
 
 #include "audio_i2s.h"
 #include "es8311.h"
+#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -200,10 +201,14 @@ static const char *TAG = "WAV_PLAYER";
 static TaskHandle_t s_reader_task;
 static StaticTask_t s_reader_task_control_block;
 static StackType_t s_reader_task_stack[WAV_PLAYER_READER_TASK_STACK_DEPTH];
-/* I2S DMA 写任务同样使用静态 TCB 和静态栈，运行优先级高于读任务。 */
+/*
+ * I2S 写任务只访问消息队列、PSRAM PCM 缓冲和 I2S 驱动，不执行 SD/SPI DMA
+ * 操作，因此 4 KiB 静态栈放在 PSRAM。TCB 保留在调度器要求的内部 RAM。
+ */
 static TaskHandle_t s_writer_task;
 static StaticTask_t s_writer_task_control_block;
-static StackType_t s_writer_task_stack[WAV_PLAYER_WRITER_TASK_STACK_DEPTH];
+static EXT_RAM_BSS_ATTR StackType_t
+    s_writer_task_stack[WAV_PLAYER_WRITER_TASK_STACK_DEPTH];
 /*
  * 两个音频缓冲在 wav_player_init() 中一次性分配。BUFFER_READY 和
  * BUFFER_RELEASED 消息负责转移所有权：同一时刻每块缓冲只属于 SD 任务
@@ -214,13 +219,15 @@ static uint8_t *s_buffer2;
 /*
  * 读任务收件队列：UI 和写任务都是生产者，wav_reader_task 是唯一消费者。
  * 任务没有事件时永久阻塞在该队列，不使用超时轮询。
- * storage 数组保存队列项目本体，StaticQueue_t 保存 FreeRTOS 队列控制信息，
- * 因此 xQueueCreateStatic() 不会再从系统堆申请队列内存。
+ * storage 数组保存队列项目本体，StaticQueue_t 保存 FreeRTOS 队列控制信息。
+ * 队列只在普通任务中访问，不从 ISR 使用；体积较大的项目存储区放在 PSRAM，
+ * 高频访问且很小的 FreeRTOS 控制块仍留在内部 RAM。
  */
 static QueueHandle_t s_reader_queue;
 static StaticQueue_t s_reader_queue_control_block;
-static uint8_t s_reader_queue_storage[WAV_PLAYER_READER_QUEUE_LENGTH *
-                                      sizeof(reader_message_t)];
+static EXT_RAM_BSS_ATTR uint8_t
+    s_reader_queue_storage[WAV_PLAYER_READER_QUEUE_LENGTH *
+                           sizeof(reader_message_t)];
 /*
  * 写任务收件队列：读任务是唯一生产者，audio_writer_task 是唯一消费者。
  * START/BUFFER_READY 从队尾进入，STOP 从队首进入。
@@ -228,8 +235,9 @@ static uint8_t s_reader_queue_storage[WAV_PLAYER_READER_QUEUE_LENGTH *
  */
 static QueueHandle_t s_writer_queue;
 static StaticQueue_t s_writer_queue_control_block;
-static uint8_t s_writer_queue_storage[WAV_PLAYER_WRITER_QUEUE_LENGTH *
-                                      sizeof(writer_message_t)];
+static EXT_RAM_BSS_ATTR uint8_t
+    s_writer_queue_storage[WAV_PLAYER_WRITER_QUEUE_LENGTH *
+                           sizeof(writer_message_t)];
 /* 状态快照可能由 SD/控制任务写、LVGL 任务读，必须作为整体同步复制。 */
 static wav_player_status_t s_status;
 static portMUX_TYPE s_status_lock = portMUX_INITIALIZER_UNLOCKED;

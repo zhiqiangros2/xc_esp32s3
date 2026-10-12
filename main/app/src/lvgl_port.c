@@ -548,11 +548,16 @@ esp_err_t lvgl_port_start(void)
 
     /* 首屏已经创建完成，现在才允许 LVGL 执行第一次布局和刷新。 */
     ESP_LOGI(TAG,
-              "LVGL 9 ready: %ux%u, RGB565, draw buffers=2x full screen "
-              "in PSRAM, task=single, stack=%u bytes in internal RAM",
+              "LVGL 9 ready: %ux%u, RGB565, objects/draw buffers in PSRAM, "
+              "task=single, stack=%u bytes in internal RAM, "
+              "internal free/largest=%u/%u",
               LCD_X_RESOLUTION,
               LCD_Y_RESOLUTION,
-              (unsigned)LVGL_TASK_STACK_SIZE);
+              (unsigned)LVGL_TASK_STACK_SIZE,
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                                  MALLOC_CAP_8BIT),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                          MALLOC_CAP_8BIT));
     return ESP_OK;
 }
 

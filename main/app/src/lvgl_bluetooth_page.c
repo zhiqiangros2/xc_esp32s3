@@ -16,7 +16,8 @@
  *   AA:BB:CC:DD:EE:FF    RSSI: -55 dBm
  *
  * 页面不从 NimBLE 回调直接修改 LVGL。这样蓝牙主机任务不需要取得 LVGL 锁，
- * 页面销毁后也不会收到指向已释放对象的异步回调。
+ * 页面销毁后也不会收到指向已释放对象的异步回调。页面行文本和设备快照都随
+ * 页面上下文放在 PSRAM，2 秒刷新回调不在 LVGL 内部任务栈上创建大数组。
  */
 #include "lvgl_bluetooth_page.h"
 
@@ -25,6 +26,7 @@
 #include <string.h>
 
 #include "ble_scanner.h"
+#include "esp_heap_caps.h"
 
 #define BLUETOOTH_PAGE_REFRESH_INTERVAL_MS 2000U
 #define BLUETOOTH_PAGE_ROW_TEXT_MAX 128U
@@ -43,6 +45,8 @@ typedef struct {
     lv_obj_t *empty_label;
     lv_timer_t *refresh_timer;
     bluetooth_device_row_t rows[BLE_SCANNER_MAX_DEVICES];
+    /* 快照约 1.8 KiB，保存在 PSRAM 页面上下文中，避免占用 LVGL 内部栈。 */
+    ble_scanner_snapshot_t snapshot;
     size_t row_count;
     lvgl_language_t language;
     const lv_font_t *ui_font;
@@ -125,46 +129,46 @@ static void refresh_device_list(lv_timer_t *timer)
     const lvgl_language_texts_t *texts =
         lvgl_language_get_texts(context->language);
 
-    ble_scanner_snapshot_t snapshot;
-    if (ble_scanner_get_snapshot(&snapshot) != ESP_OK) {
+    ble_scanner_snapshot_t *snapshot = &context->snapshot;
+    if (ble_scanner_get_snapshot(snapshot) != ESP_OK) {
         lv_label_set_text(context->status_label, texts->ble_error);
         lv_label_set_text(context->empty_label, texts->ble_error);
         lv_obj_set_hidden(context->empty_label, false);
         return;
     }
 
-    sort_by_signal_strength(&snapshot);
-    if (!snapshot.ready || !snapshot.scanning) {
+    sort_by_signal_strength(snapshot);
+    if (!snapshot->ready || !snapshot->scanning) {
         lv_label_set_text(context->status_label, texts->ble_scanning);
     } else {
         lv_label_set_text_fmt(context->status_label,
                               "%s: %u",
                               texts->ble_devices,
-                              (unsigned)snapshot.device_count);
+                              (unsigned)snapshot->device_count);
     }
 
-    if (snapshot.device_count == 0U) {
+    if (snapshot->device_count == 0U) {
         lv_label_set_text(context->empty_label,
-                          snapshot.ready ? texts->ble_no_devices
-                                         : texts->ble_scanning);
+                          snapshot->ready ? texts->ble_no_devices
+                                          : texts->ble_scanning);
         lv_obj_set_hidden(context->empty_label, false);
     } else {
         lv_obj_set_hidden(context->empty_label, true);
     }
 
     /* 分批建立行；已经建立的隐藏行可以直接重新用于后来出现的设备。 */
-    if (context->row_count < snapshot.device_count) {
+    if (context->row_count < snapshot->device_count) {
         (void)add_device_row(context);
     }
 
     for (size_t index = 0; index < context->row_count; ++index) {
         bluetooth_device_row_t *row = &context->rows[index];
-        if (index >= snapshot.device_count) {
+        if (index >= snapshot->device_count) {
             lv_obj_set_hidden(row->container, true);
             continue;
         }
 
-        const ble_scanner_device_t *device = &snapshot.devices[index];
+        const ble_scanner_device_t *device = &snapshot->devices[index];
         const char *name = device->name[0] == '\0'
                                ? texts->ble_unnamed
                                : device->name;
@@ -243,7 +247,7 @@ static void bluetooth_page_deleted(lv_event_t *event)
         lv_timer_delete(context->refresh_timer);
         context->refresh_timer = NULL;
     }
-    free(context);
+    heap_caps_free(context);
 }
 
 lv_obj_t *lvgl_bluetooth_page_create(lv_obj_t *return_page,
@@ -254,7 +258,10 @@ lv_obj_t *lvgl_bluetooth_page_create(lv_obj_t *return_page,
         return NULL;
     }
 
-    bluetooth_page_context_t *context = calloc(1, sizeof(*context));
+    bluetooth_page_context_t *context = heap_caps_calloc(
+        1,
+        sizeof(*context),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (context == NULL) {
         return NULL;
     }
@@ -264,7 +271,7 @@ lv_obj_t *lvgl_bluetooth_page_create(lv_obj_t *return_page,
 
     lv_obj_t *page = lv_obj_create(NULL);
     if (page == NULL) {
-        free(context);
+        heap_caps_free(context);
         return NULL;
     }
     context->page = page;

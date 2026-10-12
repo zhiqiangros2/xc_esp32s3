@@ -219,15 +219,16 @@ static void update_elapsed_time(uint32_t data_size)
     portEXIT_CRITICAL(&s_status_lock);
 }
 
-/** 优先从 PSRAM 分配大块音频缓存，PSRAM 不可用时退回内部 8-bit RAM。 */
+/**
+ * 从 PSRAM 分配录音工作缓冲。
+ *
+ * 这些缓冲由普通任务读写，不直接交给 DMA；项目固定配置 8 MiB PSRAM，因此分配
+ * 失败时返回错误，不回退占用紧张的内部 RAM。I2S 驱动自己的 DMA 缓冲仍在内部。
+ */
 static void *allocate_audio_buffer(size_t size)
 {
-    void *buffer = heap_caps_malloc(size,
-                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (buffer == NULL) {
-        buffer = heap_caps_malloc(size, MALLOC_CAP_8BIT);
-    }
-    return buffer;
+    return heap_caps_malloc(size,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 /** 释放初始化阶段已取得的全部工作缓冲，供任一失败分支统一清理。 */

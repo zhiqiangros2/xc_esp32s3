@@ -4,7 +4,8 @@
  *
  * 页面先完成固定控件的首帧绘制，再由 LVGL 定时器逐项扫描目录和创建文件按钮，
  * 避免文件较多时阻塞页面切换。删除成功后以相同方式重新扫描；关闭根对象时会
- * 停止扫描、关闭目录，并释放文件按钮和页面上下文。
+ * 停止扫描、关闭目录，并释放文件按钮和页面上下文。页面及每个文件的路径上下文
+ * 都放在 PSRAM，目录文件较多时不会持续占用内部堆。
  */
 #include "lvgl_wav_manager_page.h"
 
@@ -17,6 +18,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "sd_fatfs.h"
 
@@ -90,7 +92,7 @@ static void clear_selection(wav_manager_page_context_t *context)
 /** 文件按钮删除时释放它独占的路径和页面回指上下文。 */
 static void file_context_deleted(lv_event_t *event)
 {
-    free(lv_event_get_user_data(event));
+    heap_caps_free(lv_event_get_user_data(event));
 }
 
 /** 选中一个文件；同一时间只有一个按钮保持选中颜色。 */
@@ -129,7 +131,10 @@ static void file_button_clicked(lv_event_t *event)
 static bool add_file_button(wav_manager_page_context_t *context,
                             const char *file_name)
 {
-    wav_manager_file_context_t *file = calloc(1, sizeof(*file));
+    wav_manager_file_context_t *file = heap_caps_calloc(
+        1,
+        sizeof(*file),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (file == NULL) {
         return false;
     }
@@ -140,13 +145,13 @@ static bool add_file_button(wav_manager_page_context_t *context,
                                      WAV_MANAGER_DIRECTORY,
                                      file_name);
     if (path_length < 0 || (size_t)path_length >= sizeof(file->path)) {
-        free(file);
+        heap_caps_free(file);
         return false;
     }
 
     lv_obj_t *button = lv_button_create(context->list);
     if (button == NULL) {
-        free(file);
+        heap_caps_free(file);
         return false;
     }
     file->page_context = context;
@@ -391,7 +396,7 @@ static void manager_page_deleted(lv_event_t *event)
         closedir(context->directory);
         context->directory = NULL;
     }
-    free(context);
+    heap_caps_free(context);
 }
 
 lv_obj_t *lvgl_wav_manager_page_create(lv_obj_t *return_page,
@@ -402,7 +407,10 @@ lv_obj_t *lvgl_wav_manager_page_create(lv_obj_t *return_page,
         return NULL;
     }
 
-    wav_manager_page_context_t *context = calloc(1, sizeof(*context));
+    wav_manager_page_context_t *context = heap_caps_calloc(
+        1,
+        sizeof(*context),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (context == NULL) {
         return NULL;
     }
@@ -412,7 +420,7 @@ lv_obj_t *lvgl_wav_manager_page_create(lv_obj_t *return_page,
 
     lv_obj_t *page = lv_obj_create(NULL);
     if (page == NULL) {
-        free(context);
+        heap_caps_free(context);
         return NULL;
     }
     context->page = page;
