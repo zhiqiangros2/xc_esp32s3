@@ -157,8 +157,9 @@ static model_iface_data_t *s_multinet_data;
 
 /*
  * 采集回调到 Feed 任务之间的数据通道：控制结构在静态内存中，128 KiB 数据区
- * 在初始化时分配到 PSRAM。回调交错缓冲也在 PSRAM；AFE 当前输入块位于内部
- * RAM，保证 AFE 处理时访问稳定且不受 PSRAM 带宽影响。
+ * 在初始化时分配到 PSRAM。回调交错缓冲和 AFE 当前输入块也位于 PSRAM；
+ * 三者都只由普通任务访问，不参与 I2S DMA。这样可把紧张的片内 RAM 留给
+ * WiFi、BLE、I2S DMA 和只能使用内部存储器的驱动控制结构。
  */
 static StreamBufferHandle_t s_capture_stream;
 static StaticStreamBuffer_t s_capture_stream_control;
@@ -743,8 +744,10 @@ esp_err_t speech_recognition_init(void)
      *   s_capture_stream_storage = 128 KiB，回调和 Feed 之间的蓄水缓冲
      *   s_callback_interleaved   = 8 KiB，把 MIC1/MIC3 平面数据交错
      *
-     * AFE 输入块放内部 RAM：
-     *   大小 = feed 样本数 x 2 通道 x 2 字节，由当前模型运行时决定
+     * AFE 输入块同样放 PSRAM：
+     *   大小 = feed 样本数 x 2 通道 x 2 字节，由当前模型运行时决定。
+     *   当前模型是 512 x 2 x 2 = 2048 字节。feed() 在普通任务中同步读取该
+     *   缓冲，不交给 DMA，因此不要求 MALLOC_CAP_INTERNAL。
      */
     s_capture_stream_storage = heap_caps_malloc(
         SPEECH_STREAM_BUFFER_SIZE,
@@ -752,16 +755,17 @@ esp_err_t speech_recognition_init(void)
     s_callback_interleaved = heap_caps_malloc(
         SPEECH_CALLBACK_BUFFER_SIZE,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    /* AFE feed 输入放在内部 RAM，避免模型处理时访问外部内存。 */
+    /* AFE feed 输入不是 DMA 缓冲；放入 PSRAM，避免片内连续块不足。 */
     s_afe_input = heap_caps_malloc(
         s_afe_feed_samples * SPEECH_INPUT_CHANNEL_COUNT * sizeof(int16_t),
-        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_capture_stream_storage == NULL ||
         s_callback_interleaved == NULL ||
         s_afe_input == NULL) {
         result = ESP_ERR_NO_MEM;
         goto failed;
     }
+    log_heap_state("After application buffers");
 
     /*
      * 使用预分配的 PSRAM 数据区创建静态 StreamBuffer。触发级别 1 表示有任意

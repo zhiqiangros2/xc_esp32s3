@@ -5,6 +5,7 @@
 #include "lvgl_music_page.h"
 #include "lvgl_record_page.h"
 #include "lvgl_wav_manager_page.h"
+#include "lvgl_wifi_page.h"
 
 #include <stdbool.h>
 
@@ -19,6 +20,7 @@ typedef enum {
     TEST_PAGE_CONTROL_WAV_MANAGER,
     TEST_PAGE_CONTROL_CAMERA,
     TEST_PAGE_CONTROL_BLUETOOTH,
+    TEST_PAGE_CONTROL_WIFI,
     TEST_PAGE_CONTROL_BACK,
     TEST_PAGE_CONTROL_COMPLETE,
 } test_page_control_t;
@@ -31,6 +33,7 @@ static lv_obj_t *s_record_label;
 static lv_obj_t *s_wav_manager_label;
 static lv_obj_t *s_camera_label;
 static lv_obj_t *s_bluetooth_label;
+static lv_obj_t *s_wifi_label;
 static lv_timer_t *s_build_timer;
 static lvgl_language_t s_language;
 static const lv_font_t *s_ui_font;
@@ -56,9 +59,26 @@ static void test_page_deleted(lv_event_t *event)
         s_wav_manager_label = NULL;
         s_camera_label = NULL;
         s_bluetooth_label = NULL;
+        s_wifi_label = NULL;
         s_ui_font = NULL;
         s_next_control = TEST_PAGE_CONTROL_COMPLETE;
         s_build_started = false;
+    }
+}
+
+/** 点击时创建 WiFi 页面；关闭页面不影响 STA、SoftAP 或自动重连。 */
+static void wifi_button_clicked(lv_event_t *event)
+{
+    if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    lv_obj_t *test_page = lv_obj_get_screen(lv_event_get_target(event));
+    lv_obj_t *wifi_page = lvgl_wifi_page_create(test_page,
+                                                s_language,
+                                                s_ui_font);
+    if (wifi_page != NULL) {
+        lv_screen_load(wifi_page);
     }
 }
 
@@ -220,12 +240,17 @@ void lvgl_test_page_set_language(lvgl_language_t language,
         lv_obj_set_style_text_font(s_bluetooth_label, font, 0);
         lv_obj_center(s_bluetooth_label);
     }
+    if (s_wifi_label != NULL) {
+        lv_label_set_text(s_wifi_label, texts->wifi);
+        lv_obj_set_style_text_font(s_wifi_label, font, 0);
+        lv_obj_center(s_wifi_label);
+    }
 }
 
 /**
  * 每次定时器回调只创建一个按钮及其标签。
  *
- * 中文 TTF 的新字形会在标签首次绘制时按需读取和生成。把六组控件拆到不同
+ * 中文 TTF 的新字形会在标签首次绘制时按需读取和生成。把七组控件拆到不同
  * LVGL 周期，可以让触摸、刷新和其他任务在两组控件之间继续运行，避免测试页
  * 首次打开时长时间停留在旧页面。
  */
@@ -357,6 +382,29 @@ static void create_next_control(lv_timer_t *timer)
                                         lv_color_hex(0xFFFFFF),
                                         0);
             lv_obj_center(s_bluetooth_label);
+            s_next_control = TEST_PAGE_CONTROL_WIFI;
+            break;
+
+        case TEST_PAGE_CONTROL_WIFI:
+            button = lv_button_create(s_test_page);
+            lv_obj_set_size(button, 92, 44);
+            lv_obj_set_pos(button, 220, 52);
+            lv_obj_set_style_radius(button, 4, 0);
+            lv_obj_set_style_bg_color(button, lv_color_hex(0x37474F), 0);
+            lv_obj_set_style_bg_color(button,
+                                      lv_color_hex(0x263238),
+                                      LV_STATE_PRESSED);
+            lv_obj_add_event_cb(button,
+                                wifi_button_clicked,
+                                LV_EVENT_CLICKED,
+                                NULL);
+            s_wifi_label = lv_label_create(button);
+            lv_label_set_text(s_wifi_label, texts->wifi);
+            lv_obj_set_style_text_font(s_wifi_label, font, 0);
+            lv_obj_set_style_text_color(s_wifi_label,
+                                        lv_color_hex(0xFFFFFF),
+                                        0);
+            lv_obj_center(s_wifi_label);
             s_next_control = TEST_PAGE_CONTROL_BACK;
             break;
 
@@ -433,7 +481,7 @@ lv_obj_t *lvgl_test_page_create(lv_obj_t *main_page,
 
     /*
      * 创建函数到这里立即返回。调用者加载屏幕后先得到完整背景，DRAW_POST
-     * 回调随后启动定时器，按音乐、录音、WAV 管理、摄像头、蓝牙、返回的顺序
+     * 回调随后启动定时器，按音乐、录音、WAV 管理、摄像头、蓝牙、WiFi、返回的顺序
      * 逐个创建控件，避免所有中文 TTF 字形集中在同一个首帧内生成。
      */
     return test_page;

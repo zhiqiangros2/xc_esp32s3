@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/idf_additions.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lcd.h"
@@ -25,11 +26,10 @@
  * 再加上 LVGL 绘制和 FreeType 上层调用，需要为主任务保留 32 KiB 栈。
  * ESP-IDF 的任务栈大小参数以字节为单位。
  *
- * LVGL 会在本任务中通过 FreeType 按需读取 SD 字体。ESP-IDF 的 SDSPI 驱动
- * 会直接把若干局部控制变量交给 SPI DMA，因此任务栈必须位于片内 RAM；如果
- * 栈位于 PSRAM，底层每次轮询 SD 都要动态申请片内 DMA 临时缓冲，片内堆紧张
- * 时会报 "Failed to allocate priv TX buffer"。这里使用文件级静态数组在链接期
- * 预留连续的片内栈，不依赖 ESP-SR 启动后的动态堆状态。
+ * LVGL 会在本任务中通过 FreeType 按需读取 SD 字体。该栈不直接作为 LCD 的
+ * 大块 DMA 图像缓冲，因此放入 PSRAM；SDSPI 遇到栈上的小型控制事务时，由
+ * 驱动临时准备片内 DMA 缓冲。这样可把约 32 KiB 片内 RAM 留给 WiFi/BLE
+ * 共存定时器、I2S DMA 和其他只能使用内部存储器的驱动资源。
  */
 #define LVGL_TASK_STACK_SIZE (32U * 1024U)
 
@@ -47,9 +47,6 @@ static const char *TAG = "LVGL";
 
 /* LVGL 主任务句柄，用于确认任务是否创建以及初始化失败时删除任务。 */
 static TaskHandle_t lvgl_task_handle = NULL;
-/* LVGL 任务控制块和 32 KiB 栈均由静态存储提供，不在运行期申请或释放。 */
-static StaticTask_t lvgl_task_control_block;
-static StackType_t lvgl_task_stack[LVGL_TASK_STACK_SIZE];
 
 /*
  * 串行化 LVGL 主任务和摄像头预览任务对 LVGL 对象树的访问。使用递归锁，
@@ -365,8 +362,8 @@ static void lvgl_task(void *argument)
 static void lvgl_release_resources(void)
 {
     if (lvgl_task_handle != NULL) {
-        /* 静态任务只删除调度对象；TCB 和栈数组属于本文件，不能释放。 */
-        vTaskDelete(lvgl_task_handle);
+        /* WithCaps 任务的 TCB 和 PSRAM 栈必须由配套接口一起释放。 */
+        vTaskDeleteWithCaps(lvgl_task_handle);
         lvgl_task_handle = NULL;
     }
     if (lvgl_touch_input != NULL) {
@@ -523,41 +520,46 @@ esp_err_t lvgl_port_start(void)
     }
 
     /*
-     * 使用链接期已预留的片内 TCB 和栈创建任务。LVGL/FreeType 发起 SD-SPI
-     * 访问时，SDSPI 的局部事务描述和单字节轮询变量因而都位于片内 RAM，
-     * SPI DMA 可以直接访问，不会再为这些控制事务动态申请临时缓冲。
+     * 32 KiB 栈明确从 PSRAM 分配，TCB 仍由 FreeRTOS 保存在片内 RAM。外部栈
+     * 已由 CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM 启用；任务若被删除，
+     * 必须使用 vTaskDeleteWithCaps() 与本创建接口配对。
      */
-    lvgl_task_handle = xTaskCreateStatic(lvgl_task,
-                                         "lvgl",
-                                         LVGL_TASK_STACK_SIZE,
-                                         NULL,
-                                         LVGL_TASK_PRIORITY,
-                                         lvgl_task_stack,
-                                         &lvgl_task_control_block);
-    if (lvgl_task_handle == NULL) {
+    if (xTaskCreateWithCaps(lvgl_task,
+                            "lvgl",
+                            LVGL_TASK_STACK_SIZE,
+                            NULL,
+                            LVGL_TASK_PRIORITY,
+                            &lvgl_task_handle,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG,
-                 "Failed to create LVGL task: static internal stack=%u bytes; "
-                 "internal free/largest=%u/%u",
+                 "Failed to create LVGL task: PSRAM stack=%u bytes; "
+                 "internal free/largest=%u/%u, PSRAM free/largest=%u/%u",
                  (unsigned)LVGL_TASK_STACK_SIZE,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
                                                     MALLOC_CAP_8BIT),
                  (unsigned)heap_caps_get_largest_free_block(
-                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(
+                     MALLOC_CAP_SPIRAM));
+        lvgl_task_handle = NULL;
         return ESP_ERR_NO_MEM;
     }
 
     /* 首屏已经创建完成，现在才允许 LVGL 执行第一次布局和刷新。 */
     ESP_LOGI(TAG,
               "LVGL 9 ready: %ux%u, RGB565, objects/draw buffers in PSRAM, "
-              "task=single, stack=%u bytes in internal RAM, "
-              "internal free/largest=%u/%u",
+              "task=single, stack=%u bytes in PSRAM, "
+              "internal free/largest=%u/%u, PSRAM free/largest=%u/%u",
               LCD_X_RESOLUTION,
               LCD_Y_RESOLUTION,
               (unsigned)LVGL_TASK_STACK_SIZE,
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
                                                   MALLOC_CAP_8BIT),
               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
-                                                          MALLOC_CAP_8BIT));
+                                                          MALLOC_CAP_8BIT),
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     return ESP_OK;
 }
 

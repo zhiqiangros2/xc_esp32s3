@@ -103,8 +103,26 @@ esp_err_t camera_init(void)
     }
 
     /*
-     * esp_camera_init() 默认会立即打开 VSYNC。当前应用按需取帧，因此初始化
-     * 返回后马上暂停；后续 camera_read_rgb565_frame() 每次自行开启和关闭。
+     * esp_camera_init() 会创建驱动任务、分配一块帧缓冲，并立即打开 VSYNC
+     * 中断。这里在初始化完成后马上调用 cam_stop()：关闭 VSYNC 中断并停止
+     * GDMA，所以摄像头默认不向 ESP32-S3 采集图像。GC0308 仍保持供电和配置，
+     * 驱动任务及帧缓冲也继续保留，下一次读取时不需要重新初始化摄像头。
+     *
+     * camera_read_rgb565_frame() 的一次调用对应一次完整采集：
+     *
+     *   cam_start()                 打开 VSYNC 中断
+     *        |
+     *        v
+     *   等待下一次 VSYNC            ISR 启动 GDMA 接收图像
+     *        |
+     *        v
+     *   esp_camera_fb_get() 返回     已取得一帧完整的 320x240 RGB565 数据
+     *        |
+     *        v
+     *   cam_stop()                  关闭 VSYNC 中断并停止 GDMA
+     *
+     * 因此页面未打开时不会采集，也不会持续产生摄像头 DMA 中断；页面打开后，
+     * 预览任务重复调用读取函数，按“一次调用采集一帧”的方式连续刷新画面。
      */
     cam_stop();
 

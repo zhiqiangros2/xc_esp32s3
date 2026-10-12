@@ -29,6 +29,7 @@
 #include "spi.h"
 #include "tp.h"
 #include "wav_player.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "BOX3";
 
@@ -36,7 +37,7 @@ void app_main(void)
 {
     vTaskDelay(pdMS_TO_TICKS(10000));
 
-    /* NVS 用于蓝牙控制器的 PHY 校准和配对信息，必须先于蓝牙功能初始化。 */
+    /* NVS 保存 WiFi 选择，并供无线控制器保存 PHY 校准等系统数据。 */
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
         err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -47,18 +48,6 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     bsp_info_print();
-
-    /*
-     * ESP32-S3 只支持 BLE。启动 NimBLE Observer 常驻主动扫描，设备名称、MAC
-     * 和 RSSI 由 BSP 保存；LVGL 页面是否打开不会启停扫描。初始化失败时保留
-     * 其他功能，蓝牙页面会显示扫描服务不可用。
-     */
-    const esp_err_t ble_result = ble_scanner_init();
-    if (ble_result != ESP_OK) {
-        ESP_LOGW(TAG,
-                 "BLE scanner unavailable; continuing without BLE: %s",
-                 esp_err_to_name(ble_result));
-    }
 
     /* 全局 GPIO ISR 服务只安装一次，供后续 GPIO0 和 GPIO42 中断共同使用。 */
     ESP_ERROR_CHECK(board_gpio_isr_service_init());
@@ -98,10 +87,11 @@ void app_main(void)
     ESP_ERROR_CHECK(tp_init());
 
     /*
-     * 初始化 GC0308、两块驱动帧缓冲以及 VSYNC/PCLK/GDMA 中断。摄像头页面
-     * 是否打开只决定是否取出完整帧交给 LVGL 显示；关闭页面不会反初始化
-     * 摄像头，底层中断仍保留。CAMERA_GRAB_WHEN_EMPTY 在无人取帧且两块驱动
-     * 缓冲均已占用时不会覆盖旧帧，重新打开页面后再继续流式采集。
+     * 初始化 GC0308、摄像头驱动任务和一块 PSRAM 帧缓冲。camera_init() 返回
+     * 前会关闭 VSYNC 中断并停止 GDMA，因此默认不采集图像；传感器仍保持供电
+     * 和配置，驱动任务及帧缓冲也保留。打开摄像头页面后，预览任务每次读取前
+     * 临时启动采集，取得一帧完整图像后立即停止；关闭页面后不再读取，也不会
+     * 持续产生摄像头 DMA 中断。
      */
     esp_err_t camera_result = camera_init();
     if (camera_result != ESP_OK) {
@@ -209,6 +199,32 @@ void app_main(void)
      */
     ESP_ERROR_CHECK(interrupt_manager_init(INTERRUPT_SOURCE_AW9523B |
                                            INTERRUPT_SOURCE_TOUCH));
+
+    /*
+     * 共享 I2C0 上的 AW9523B、触摸、摄像头 SCCB 和两个音频 Codec 已全部完成
+     * 上电配置，此时再启动 WiFi/BLE。这样 STA 认证、关联和 BLE 主动扫描的
+     * 射频启动高峰不会与开机阶段连续的 I2C 配置事务同时发生。
+     *
+     * 存在已保存 WiFi 配置时自动恢复；STA 断线后退避重连，SoftAP 通过
+     * NAPT 把客户端流量转发到 STA。没有保存配置时等待 WiFi 页面选择。
+     */
+    const esp_err_t wifi_result = wifi_manager_init();
+    if (wifi_result != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "WiFi manager unavailable; continuing without WiFi: %s",
+                 esp_err_to_name(wifi_result));
+    }
+
+    /*
+     * ESP32-S3 只支持 BLE。NimBLE Observer 启动后永久主动扫描，设备名称、
+     * MAC 和 RSSI 由 BSP 保存；LVGL 页面是否打开不会启停扫描。
+     */
+    const esp_err_t ble_result = ble_scanner_init();
+    if (ble_result != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "BLE scanner unavailable; continuing without BLE: %s",
+                 esp_err_to_name(ble_result));
+    }
 
     /* 启动“你好小鑫”唤醒、中文命令识别和红灯控制任务。 */
     ESP_ERROR_CHECK(speech_recognition_init());

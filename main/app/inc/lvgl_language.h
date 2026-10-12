@@ -40,6 +40,16 @@ typedef struct {
     const char *ble_no_devices;
     const char *ble_unnamed;
     const char *ble_error;
+    const char *wifi;
+    const char *wifi_not_selected;
+    const char *wifi_connecting;
+    const char *wifi_connected;
+    const char *wifi_reconnecting;
+    const char *wifi_sharing;
+    const char *wifi_waiting_sta;
+    const char *wifi_clients;
+    const char *wifi_unavailable;
+    const char *wifi_clear;
     const char *wav_manager;
     const char *wav_delete;
     const char *wav_select_file;
