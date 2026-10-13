@@ -54,11 +54,14 @@
  * 3. 运行期间 STA 断开
  *
  *      清除 sta_connected 和旧 IP -> 标记 reconnecting
- *                  -> 立即重试一次 -> 2 秒 -> 5 秒 -> 每 10 秒重试
+ *                  -> 没有 AP 客户端：立即、2 秒、5 秒、每 10 秒重试
+ *                  -> 已有 AP 客户端：暂停 STA 扫描
  *
- *    SoftAP 不停止，已经连接的 AP 客户端仍可留在本地网络，但 STA 恢复并
- *    重新获得 IP 前不能访问外网。重连成功后刷新 SoftAP DNS，外网恢复。
- *    断线不会删除或改写 NVS 中保存的 STA/AP 选择。
+ *    ESP32-S3 只有一套 2.4 GHz 射频。STA 搜索已关闭的路由器时需要切换信道，
+ *    会打断 SoftAP 与手机的通信。因此只要 SoftAP 仍有客户端，就取消尚未
+ *    开始的 STA 重试；最后一个客户端离开后再恢复扫描。这样无外网时手机仍
+ *    可稳定访问 192.168.4.1 所在的本地网络。重连成功后刷新 SoftAP DNS，
+ *    外网恢复。断线不会删除或改写 NVS 中保存的 STA/AP 选择。
  *
  * 4. 再次启动
  *
@@ -78,6 +81,7 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
@@ -158,6 +162,45 @@ static esp_err_t apply_sta_profile(size_t profile_index);
 static esp_err_t apply_ap_profile(size_t profile_index);
 static esp_err_t clear_saved_profiles(void);
 static void wifi_command_task(void *argument);
+
+/** 把常见的 WiFi 断开 reason 转成便于串口分析的短文本。 */
+static const char *wifi_disconnect_reason_text(uint16_t reason)
+{
+    switch (reason) {
+        case WIFI_REASON_UNSPECIFIED:
+            return "unspecified";
+        case WIFI_REASON_AUTH_LEAVE:
+            return "authentication leave";
+        case WIFI_REASON_DISASSOC_DUE_TO_INACTIVITY:
+            return "inactivity";
+        case WIFI_REASON_ASSOC_LEAVE:
+            return "association leave";
+        case WIFI_REASON_MISSING_ACKS:
+            return "missing ACKs";
+        case WIFI_REASON_STA_LEAVING:
+            return "station leaving";
+        case WIFI_REASON_TIMEOUT:
+            return "timeout";
+        case WIFI_REASON_PEER_INITIATED:
+            return "client initiated";
+        case WIFI_REASON_AP_INITIATED:
+            return "SoftAP initiated";
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return "beacon timeout";
+        case WIFI_REASON_NO_AP_FOUND:
+            return "upstream AP not found";
+        case WIFI_REASON_AUTH_FAIL:
+            return "authentication failed";
+        case WIFI_REASON_ASSOC_FAIL:
+            return "association failed";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "handshake timeout";
+        case WIFI_REASON_SA_QUERY_TIMEOUT:
+            return "SA query timeout";
+        default:
+            return "other";
+    }
+}
 
 /** 根据 SSID 查找代码中固定的 WiFi 配置，找不到时返回 NULL。 */
 static const wifi_profile_t *find_profile_by_ssid(
@@ -465,7 +508,9 @@ static void configure_softap_uplink_if_ready(void)
  *
  * esp_timer 回调运行在系统定时器任务中。回调只读取很短的共享状态并调用
  * 非阻塞的 esp_wifi_connect()；扫描、认证和 DHCP 都由 WiFi 驱动异步完成。
- * 如果等待期间已经连上、切换了 STA 配置或取消了 STA，本次回调直接退出。
+ * 如果等待期间已经连上、切换了 STA 配置、取消了 STA，或者 SoftAP 已有
+ * 客户端，本次回调直接退出。最后一项用于防止定时器到期与手机接入同时发生
+ * 时仍启动跨信道扫描。
  */
 static void sta_reconnect_timer_callback(void *argument)
 {
@@ -475,7 +520,8 @@ static void sta_reconnect_timer_callback(void *argument)
     const bool should_reconnect = s_status.sta_configured &&
                                   s_status.sta_reconnecting &&
                                   !s_status.sta_connected &&
-                                  !s_sta_reconfiguring;
+                                  !s_sta_reconfiguring &&
+                                  s_status.ap_client_count == 0U;
     portEXIT_CRITICAL(&s_status_lock);
     if (!should_reconnect) {
         return;
@@ -490,11 +536,15 @@ static void sta_reconnect_timer_callback(void *argument)
 }
 
 /**
- * @brief 按“立即、2 秒、5 秒、10 秒”安排下一次 STA 重连。
+ * @brief 在 SoftAP 没有客户端时安排下一次 STA 重连。
  *
  * 每次 DISCONNECTED 事件推进一级间隔，达到 10 秒后不再增长。连接成功时
  * IP_EVENT_STA_GOT_IP 会把级别清零，因此以后再次掉线仍先立即重连。延迟期间
  * SoftAP 保持工作，BLE 也能获得更多射频时间片。
+ *
+ * 只要 SoftAP 有客户端，就不启动 STA 扫描，也不推进退避级别。ESP32-S3 的
+ * STA 和 SoftAP 共用一套射频，暂停跨信道扫描可以保证无外网时的本地 AP
+ * 连接优先。最后一个 AP 客户端离开时，事件处理函数会再次调用本函数。
  */
 static void schedule_sta_reconnect(void)
 {
@@ -502,9 +552,12 @@ static void schedule_sta_reconnect(void)
                                sizeof(s_sta_reconnect_delays_ms[0]);
 
     portENTER_CRITICAL(&s_status_lock);
-    const bool should_reconnect = s_status.sta_configured &&
-                                  !s_status.sta_connected &&
-                                  !s_sta_reconfiguring;
+    const bool reconnect_pending = s_status.sta_configured &&
+                                   !s_status.sta_connected &&
+                                   !s_sta_reconfiguring;
+    const uint8_t ap_client_count = s_status.ap_client_count;
+    const bool should_reconnect = reconnect_pending &&
+                                  ap_client_count == 0U;
     size_t delay_index = s_sta_reconnect_delay_index;
     if (delay_index >= delay_count) {
         delay_index = delay_count - 1U;
@@ -516,6 +569,13 @@ static void schedule_sta_reconnect(void)
     }
     portEXIT_CRITICAL(&s_status_lock);
 
+    if (reconnect_pending && ap_client_count > 0U) {
+        (void)esp_timer_stop(s_sta_reconnect_timer);
+        ESP_LOGI(TAG,
+                 "STA reconnect paused: %u SoftAP client(s) connected",
+                 (unsigned)ap_client_count);
+        return;
+    }
     if (!should_reconnect) {
         return;
     }
@@ -583,8 +643,9 @@ static void wifi_event_handler(void *argument,
         portEXIT_CRITICAL(&s_status_lock);
 
         ESP_LOGW(TAG,
-                 "STA disconnected, reason=%u%s",
+                 "STA disconnected, reason=%u (%s)%s",
                  (unsigned)event->reason,
+                 wifi_disconnect_reason_text(event->reason),
                  reconnect ? "; retry pending" : "");
         if (reconnect) {
             schedule_sta_reconnect();
@@ -653,26 +714,81 @@ static void wifi_event_handler(void *argument,
     if (event_base == WIFI_EVENT &&
         event_id == WIFI_EVENT_AP_STACONNECTED) {
         const wifi_event_ap_staconnected_t *event = event_data;
+        wifi_sta_list_t station_list = {0};
+        const esp_err_t list_result =
+            esp_wifi_ap_get_sta_list(&station_list);
+
         portENTER_CRITICAL(&s_status_lock);
-        if (s_status.ap_client_count < UINT8_MAX) {
+        if (list_result == ESP_OK) {
+            s_status.ap_client_count = (uint8_t)station_list.num;
+        } else if (s_status.ap_client_count < UINT8_MAX) {
+            /* 读取驱动列表失败时才使用事件计数作为后备。 */
             ++s_status.ap_client_count;
         }
+        const uint8_t client_count = s_status.ap_client_count;
+        const bool sta_reconnect_paused = s_status.sta_configured &&
+                                          s_status.sta_reconnecting &&
+                                          !s_status.sta_connected;
         portEXIT_CRITICAL(&s_status_lock);
-        ESP_LOGI(TAG, "SoftAP client connected, AID=%u", (unsigned)event->aid);
+
+        /* 手机已经接入本地 AP 后，不再让待执行的 STA 扫描抢占射频。 */
+        if (sta_reconnect_paused) {
+            (void)esp_timer_stop(s_sta_reconnect_timer);
+        }
+        if (list_result != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "Cannot read SoftAP client list after connect: %s",
+                     esp_err_to_name(list_result));
+        }
+        ESP_LOGI(TAG,
+                 "SoftAP client connected: MAC=" MACSTR
+                 ", AID=%u, clients=%u%s",
+                 MAC2STR(event->mac),
+                 (unsigned)event->aid,
+                 (unsigned)client_count,
+                 sta_reconnect_paused ? "; STA scans paused" : "");
         return;
     }
 
     if (event_base == WIFI_EVENT &&
         event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         const wifi_event_ap_stadisconnected_t *event = event_data;
+        wifi_sta_list_t station_list = {0};
+        const esp_err_t list_result =
+            esp_wifi_ap_get_sta_list(&station_list);
+
         portENTER_CRITICAL(&s_status_lock);
-        if (s_status.ap_client_count > 0U) {
+        if (list_result == ESP_OK) {
+            s_status.ap_client_count = (uint8_t)station_list.num;
+        } else if (s_status.ap_client_count > 0U) {
+            /* 读取驱动列表失败时才使用事件计数作为后备。 */
             --s_status.ap_client_count;
         }
+        const uint8_t client_count = s_status.ap_client_count;
+        const bool resume_sta_reconnect = client_count == 0U &&
+                                          s_status.sta_configured &&
+                                          s_status.sta_reconnecting &&
+                                          !s_status.sta_connected &&
+                                          !s_sta_reconfiguring;
         portEXIT_CRITICAL(&s_status_lock);
+        if (list_result != ESP_OK) {
+            ESP_LOGW(TAG,
+                     "Cannot read SoftAP client list after disconnect: %s",
+                     esp_err_to_name(list_result));
+        }
         ESP_LOGI(TAG,
-                 "SoftAP client disconnected, AID=%u",
-                 (unsigned)event->aid);
+                 "SoftAP client disconnected: MAC=" MACSTR
+                 ", AID=%u, reason=%u (%s), clients=%u",
+                 MAC2STR(event->mac),
+                 (unsigned)event->aid,
+                 (unsigned)event->reason,
+                 wifi_disconnect_reason_text(event->reason),
+                 (unsigned)client_count);
+        if (resume_sta_reconnect) {
+            ESP_LOGI(TAG,
+                     "Last SoftAP client left; STA reconnect may resume");
+            schedule_sta_reconnect();
+        }
     }
 }
 
