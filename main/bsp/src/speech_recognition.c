@@ -179,6 +179,12 @@ static volatile uint32_t s_dropped_capture_blocks;
 static bool s_commands_allocated;
 static bool s_callback_registered;
 static bool s_initialized;
+/*
+ * CMD 0x03 开始新一轮时清零；识别到“打开红灯”后置位并保持。USB 命令任务
+ * 与 Detect 任务运行在不同核心，因此初始化状态和结果标志共用同一自旋锁。
+ */
+static bool s_red_on_detected;
+static portMUX_TYPE s_result_lock = portMUX_INITIALIZER_UNLOCKED;
 static const char *TAG = "SPEECH";
 
 /**
@@ -450,6 +456,12 @@ static void speech_detect_task(void *argument)
                          commands->string,
                          commands->prob[0]);
                 if (command_id == SPEECH_COMMAND_RED_ON) {
+                    /* 识别结果在灯控 I2C 动作前锁存，与硬件执行是否成功无关。 */
+                    taskENTER_CRITICAL(&s_result_lock);
+                    s_red_on_detected = true;
+                    taskEXIT_CRITICAL(&s_result_lock);
+                    ESP_LOGI(TAG, "Red-on speech result latched: 1");
+
                     const speech_action_t action = SPEECH_ACTION_RED_ON;
                     /* 队列长度为 1：覆盖尚未执行的旧灯状态。 */
                     xQueueOverwrite(s_action_queue, &action);
@@ -607,7 +619,10 @@ static esp_err_t configure_speech_commands(void)
 esp_err_t speech_recognition_init(void)
 {
     /* 幂等保护：避免重复创建模型实例、任务和采集回调。 */
-    if (s_initialized) {
+    taskENTER_CRITICAL(&s_result_lock);
+    const bool already_initialized = s_initialized;
+    taskEXIT_CRITICAL(&s_result_lock);
+    if (already_initialized) {
         return ESP_OK;
     }
 
@@ -840,7 +855,10 @@ esp_err_t speech_recognition_init(void)
         goto failed;
     }
     s_callback_registered = true;
+    taskENTER_CRITICAL(&s_result_lock);
+    s_red_on_detected = false;
     s_initialized = true;
+    taskEXIT_CRITICAL(&s_result_lock);
 
     ESP_LOGI(TAG,
              "Ready: direct 16 kHz MIC1+MIC3 -> MR, WakeNet=%s, "
@@ -858,4 +876,28 @@ failed:
     }
     cleanup_initialization();
     return result;
+}
+
+esp_err_t speech_recognition_start(void)
+{
+    taskENTER_CRITICAL(&s_result_lock);
+    if (!s_initialized) {
+        taskEXIT_CRITICAL(&s_result_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 新一轮只清除锁存结果；常驻 AFE/WakeNet/MultiNet 无需停止或重建。 */
+    s_red_on_detected = false;
+    taskEXIT_CRITICAL(&s_result_lock);
+
+    ESP_LOGI(TAG, "Speech recognition result cleared; new round started");
+    return ESP_OK;
+}
+
+bool speech_recognition_red_on_detected(void)
+{
+    taskENTER_CRITICAL(&s_result_lock);
+    const bool detected = s_red_on_detected;
+    taskEXIT_CRITICAL(&s_result_lock);
+    return detected;
 }
