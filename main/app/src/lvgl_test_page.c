@@ -82,7 +82,7 @@ static void wifi_button_clicked(lv_event_t *event)
     }
 }
 
-/** 点击时创建 BLE 设备页面；关闭页面不影响 BSP 常驻扫描。 */
+/** 点击时创建 BLE 设备页面；页面只发起一次有限时长的浏览扫描。 */
 static void bluetooth_button_clicked(lv_event_t *event)
 {
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {

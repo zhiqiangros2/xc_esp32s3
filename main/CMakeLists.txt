@@ -2,7 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "bsp/src/bsp_info.c"
-        "bsp/src/ble_scanner.c"
+        "bsp/src/ble_client.c"
         "bsp/src/flash_nvs.c"
         "bsp/src/wifi_manager.c"
         "bsp/src/i2c.c"

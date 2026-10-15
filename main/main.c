@@ -5,7 +5,7 @@
 #include "audio_i2s.h"
 #include "audio_recorder.h"
 #include "aw9523b.h"
-#include "ble_scanner.h"
+#include "ble_client.h"
 #include "bsp_info.h"
 #include "camera.h"
 #include "display.h"
@@ -226,13 +226,13 @@ void app_main(void)
     }
 
     /*
-     * ESP32-S3 只支持 BLE。NimBLE Observer 启动后永久主动扫描，设备名称、
-     * MAC 和 RSSI 由 BSP 保存；LVGL 页面是否打开不会启停扫描。
+     * ESP32-S3 只支持 BLE。这里只启动 NimBLE Central / GATT Client；实际扫描
+     * 由 LVGL 浏览页面或 CMD 0x02 发起，空闲时不进行后台扫描。
      */
-    const esp_err_t ble_result = ble_scanner_init();
+    const esp_err_t ble_result = ble_client_init();
     if (ble_result != ESP_OK) {
         ESP_LOGW(TAG,
-                 "BLE scanner unavailable; continuing without BLE: %s",
+                 "BLE client unavailable; continuing without BLE: %s",
                  esp_err_to_name(ble_result));
     }
 

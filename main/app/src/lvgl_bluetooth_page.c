@@ -1,23 +1,16 @@
 /**
  * @file lvgl_bluetooth_page.c
- * @brief 显示 BSP 常驻 BLE 扫描服务维护的设备快照。
+ * @brief 循环执行只扫描、不连接的 BLE 浏览，并显示设备快照。
  *
  * 页面与扫描服务的关系：
  *
- *   ble_scanner（页面关闭后仍持续运行）
- *                    |
- *          线程安全复制设备快照
- *                    |
- *                    v
- *          2 秒 LVGL 页面定时器
- *                    |
- *                    v
- *   名称
- *   AA:BB:CC:DD:EE:FF    RSSI: -55 dBm
+ *   扫描 5 秒 -> 展示结果 2 秒 -> 再次扫描
+ *       ^                              |
+ *       |______________________________|
  *
- * 页面不从 NimBLE 回调直接修改 LVGL。这样蓝牙主机任务不需要取得 LVGL 锁，
- * 页面销毁后也不会收到指向已释放对象的异步回调。页面行文本和设备快照都随
- * 页面上下文放在 PSRAM，2 秒刷新回调不在 LVGL 内部任务栈上创建大数组。
+ * 本页面只调用 ble_client_start_scan()，不执行连接或 GATT 操作。页面不从
+ * NimBLE 回调直接修改 LVGL；设备快照随页面上下文放在 PSRAM，2 秒刷新回调
+ * 不在 LVGL 内部任务栈上创建大数组。离开页面后不再发起下一轮扫描。
  */
 #include "lvgl_bluetooth_page.h"
 
@@ -25,10 +18,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "ble_scanner.h"
+#include "ble_client.h"
 #include "esp_heap_caps.h"
 
 #define BLUETOOTH_PAGE_REFRESH_INTERVAL_MS 2000U
+#define BLUETOOTH_PAGE_RESULT_DISPLAY_MS 2000U
+#define BLUETOOTH_PAGE_SCAN_RETRY_MS 500U
+#define BLUETOOTH_PAGE_SCAN_CYCLE_MS \
+    (BLE_CLIENT_BROWSE_DURATION_MS + BLUETOOTH_PAGE_RESULT_DISPLAY_MS)
 #define BLUETOOTH_PAGE_ROW_TEXT_MAX 128U
 
 typedef struct {
@@ -44,9 +41,10 @@ typedef struct {
     lv_obj_t *list;
     lv_obj_t *empty_label;
     lv_timer_t *refresh_timer;
-    bluetooth_device_row_t rows[BLE_SCANNER_MAX_DEVICES];
+    lv_timer_t *scan_timer;
+    bluetooth_device_row_t rows[BLE_CLIENT_MAX_DEVICES];
     /* 快照约 1.8 KiB，保存在 PSRAM 页面上下文中，避免占用 LVGL 内部栈。 */
-    ble_scanner_snapshot_t snapshot;
+    ble_client_snapshot_t snapshot;
     size_t row_count;
     lvgl_language_t language;
     const lv_font_t *ui_font;
@@ -65,10 +63,10 @@ static const lv_font_t *interface_font(
 }
 
 /** 按 RSSI 从强到弱排序快照副本，不修改 BSP 内部设备表。 */
-static void sort_by_signal_strength(ble_scanner_snapshot_t *snapshot)
+static void sort_by_signal_strength(ble_client_snapshot_t *snapshot)
 {
     for (size_t index = 1; index < snapshot->device_count; ++index) {
-        const ble_scanner_device_t current = snapshot->devices[index];
+        const ble_client_device_t current = snapshot->devices[index];
         size_t position = index;
         while (position > 0U &&
                snapshot->devices[position - 1U].rssi < current.rssi) {
@@ -83,7 +81,7 @@ static void sort_by_signal_strength(ble_scanner_snapshot_t *snapshot)
 /** 创建一个固定高度的设备行；后续刷新只修改其标签文字。 */
 static bool add_device_row(bluetooth_page_context_t *context)
 {
-    if (context->row_count >= BLE_SCANNER_MAX_DEVICES) {
+    if (context->row_count >= BLE_CLIENT_MAX_DEVICES) {
         return false;
     }
 
@@ -117,6 +115,16 @@ static bool add_device_row(bluetooth_page_context_t *context)
     return true;
 }
 
+/** 周期发起浏览扫描；CMD 占用 BLE 时短暂退让并重试。 */
+static void start_scan_cycle(lv_timer_t *timer)
+{
+    const esp_err_t result = ble_client_start_scan();
+    lv_timer_set_period(timer,
+                        result == ESP_OK
+                            ? BLUETOOTH_PAGE_SCAN_CYCLE_MS
+                            : BLUETOOTH_PAGE_SCAN_RETRY_MS);
+}
+
 /**
  * 周期读取设备快照并刷新可见列表。
  *
@@ -129,8 +137,8 @@ static void refresh_device_list(lv_timer_t *timer)
     const lvgl_language_texts_t *texts =
         lvgl_language_get_texts(context->language);
 
-    ble_scanner_snapshot_t *snapshot = &context->snapshot;
-    if (ble_scanner_get_snapshot(snapshot) != ESP_OK) {
+    ble_client_snapshot_t *snapshot = &context->snapshot;
+    if (ble_client_get_snapshot(snapshot) != ESP_OK) {
         lv_label_set_text(context->status_label, texts->ble_error);
         lv_label_set_text(context->empty_label, texts->ble_error);
         lv_obj_set_hidden(context->empty_label, false);
@@ -138,7 +146,7 @@ static void refresh_device_list(lv_timer_t *timer)
     }
 
     sort_by_signal_strength(snapshot);
-    if (!snapshot->ready || !snapshot->scanning) {
+    if (!snapshot->ready || snapshot->scanning) {
         lv_label_set_text(context->status_label, texts->ble_scanning);
     } else {
         lv_label_set_text_fmt(context->status_label,
@@ -168,7 +176,7 @@ static void refresh_device_list(lv_timer_t *timer)
             continue;
         }
 
-        const ble_scanner_device_t *device = &snapshot->devices[index];
+        const ble_client_device_t *device = &snapshot->devices[index];
         const char *name = device->name[0] == '\0'
                                ? texts->ble_unnamed
                                : device->name;
@@ -232,6 +240,14 @@ static void bluetooth_page_drawn(lv_event_t *event)
             refresh_device_list,
             BLUETOOTH_PAGE_REFRESH_INTERVAL_MS,
             context);
+        context->scan_timer = lv_timer_create(
+            start_scan_cycle,
+            BLUETOOTH_PAGE_SCAN_CYCLE_MS,
+            context);
+        if (context->scan_timer != NULL) {
+            /* 进入页面后立即启动第一轮，后续按扫描加展示周期循环。 */
+            start_scan_cycle(context->scan_timer);
+        }
         if (context->refresh_timer != NULL) {
             /* 下一次 LVGL 处理循环立即读取已有快照，不额外等待 2 秒。 */
             lv_timer_ready(context->refresh_timer);
@@ -239,13 +255,17 @@ static void bluetooth_page_drawn(lv_event_t *event)
     }
 }
 
-/** 根页面删除时只停止 UI 刷新；BSP 的 BLE 扫描任务继续常驻。 */
+/** 根页面删除时停止 UI 刷新；已经发出的有限时长扫描会自行结束。 */
 static void bluetooth_page_deleted(lv_event_t *event)
 {
     bluetooth_page_context_t *context = lv_event_get_user_data(event);
     if (context->refresh_timer != NULL) {
         lv_timer_delete(context->refresh_timer);
         context->refresh_timer = NULL;
+    }
+    if (context->scan_timer != NULL) {
+        lv_timer_delete(context->scan_timer);
+        context->scan_timer = NULL;
     }
     heap_caps_free(context);
 }
