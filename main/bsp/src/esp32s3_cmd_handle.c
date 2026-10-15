@@ -122,7 +122,7 @@ static void esp32s3_cmd_handle_bluetooth(
  * CMD 0x03 开始新一轮语音识别结果统计。
  *
  * 请求只接受 Data0=0x00。应答固定为 8 字节：Data0 表示是否成功清除上一轮
- * 结果并开始新一轮，Data1~Data7 保持 0。
+ * 结果、提交关闭红灯动作并开始新一轮，Data1~Data7 保持 0。
  */
 static void esp32s3_cmd_handle_speech_start(
     const esp32s3_protocol_frame_t *frame)

@@ -26,10 +26,11 @@ esp_err_t speech_recognition_init(void);
  * @brief 开始一轮新的语音识别结果统计。
  *
  * AFE、WakeNet 和 MultiNet 是常驻运行的，本函数不会重复创建算法实例；它会
- * 检查模块已经初始化，并把上一轮“打开红灯”识别结果清零。
+ * 检查模块已经初始化，把上一轮“打开红灯”识别结果清零，并提交关闭红灯动作。
  *
- * @return ESP_OK 已清除旧结果，可以开始新一轮识别。
+ * @return ESP_OK 已清除旧结果并提交关灯动作，可以开始新一轮识别。
  * @return ESP_ERR_INVALID_STATE 语音识别模块尚未初始化完成。
+ * @return ESP_FAIL 无法提交关闭红灯动作。
  */
 esp_err_t speech_recognition_start(void);
 

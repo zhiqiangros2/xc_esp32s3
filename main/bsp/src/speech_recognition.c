@@ -124,8 +124,9 @@ _Static_assert(AUDIO_I2S_SAMPLE_RATE_HZ == SPEECH_AFE_SAMPLE_RATE_HZ,
  * 和 ESP-SR 小块内存。任务控制块仍由 FreeRTOS 分配在片内 RAM。
  *
  * Feed 与 Detect 都是持续音频处理，使用相同优先级 5；Action 只执行低频
- * I2C 灯控，优先级 4 即可。初始化时 Feed 固定在 CPU0，Detect 固定在 CPU1，
- * 避免 AFE feed/fetch 的持续计算集中到同一核心；Action 由调度器选择核心。
+ * I2C 灯控，优先级 4 即可。Feed 固定在 CPU0，Detect 固定在 CPU1，避免
+ * WakeNet/MultiNet 计算期间两者争用同一个核心并塞满 AFE 内部队列。系统
+ * 主频使用 240 MHz，为 CPU0 上的 WiFi、NimBLE 和 Feed 保留处理余量。
  */
 #define SPEECH_FEED_TASK_STACK_SIZE 6144U
 #define SPEECH_DETECT_TASK_STACK_SIZE 8192U
@@ -809,6 +810,7 @@ esp_err_t speech_recognition_init(void)
     /*
      * Feed 固定 CPU0：从 StreamBuffer 取数据并写入 AFE。
      * Detect 固定 CPU1：从 AFE fetch 并运行 WakeNet/MultiNet 状态机。
+     * 两者分核可防止唤醒词和命令词计算阻塞 AFE 输入/输出任意一侧。
      * Action 不绑核：低频执行 AW9523B I2C 操作。
      * 三个任务的栈均明确放入 PSRAM；WithCaps 创建的任务必须由
      * vTaskDeleteWithCaps() 删除，不能使用普通 vTaskDelete() 回收。
@@ -890,7 +892,19 @@ esp_err_t speech_recognition_start(void)
     s_red_on_detected = false;
     taskEXIT_CRITICAL(&s_result_lock);
 
-    ESP_LOGI(TAG, "Speech recognition result cleared; new round started");
+    /*
+     * 开始测试时用“关灯”覆盖队列里尚未执行的旧灯控动作。实际 I2C 操作仍由
+     * speech_action_task 串行执行，避免 USB 命令任务直接访问共享 I2C 总线。
+     */
+    const speech_action_t action = SPEECH_ACTION_RED_OFF;
+    if (xQueueOverwrite(s_action_queue, &action) != pdPASS) {
+        ESP_LOGE(TAG, "Cannot queue red LED off for new speech round");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG,
+             "Speech recognition result cleared; red LED off requested; "
+             "new round started");
     return ESP_OK;
 }
 
