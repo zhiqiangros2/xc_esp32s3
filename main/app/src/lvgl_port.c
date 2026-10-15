@@ -550,7 +550,8 @@ esp_err_t lvgl_port_start(void)
     ESP_LOGI(TAG,
               "LVGL 9 ready: %ux%u, RGB565, objects/draw buffers in PSRAM, "
               "task=single, stack=%u bytes in PSRAM, "
-              "internal free/largest=%u/%u, PSRAM free/largest=%u/%u",
+              "internal free/largest=%u/%u, DMA free/largest=%u/%u, "
+              "PSRAM free/largest=%u/%u",
               LCD_X_RESOLUTION,
               LCD_Y_RESOLUTION,
               (unsigned)LVGL_TASK_STACK_SIZE,
@@ -558,6 +559,10 @@ esp_err_t lvgl_port_start(void)
                                                   MALLOC_CAP_8BIT),
               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
                                                           MALLOC_CAP_8BIT),
+              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL |
+                                                 MALLOC_CAP_DMA),
+              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL |
+                                                          MALLOC_CAP_DMA),
               (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
     return ESP_OK;

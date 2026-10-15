@@ -19,9 +19,9 @@ static lv_font_t *ui_font = NULL;
 /**
  * 从 SD 卡加载界面 TTF 字体。
  *
- * 字体文件必须位于 LVGL_UI_FONT_FILE_PATH。FreeType 使用标准只读文件流
- * 按需读取字体，并使用 ESP-IDF 默认 malloc/realloc/free 管理解析内存。
- * 小块分配优先使用内部 RAM，大块分配按照系统堆策略使用 PSRAM。
+ * 字体文件必须位于 LVGL_UI_FONT_FILE_PATH。FreeType 通过标准 VFS 文件接口
+ * 按需读取字体。项目堆策略使其中大块解析和缓存分配优先进入 PSRAM，并限制
+ * 字形缓存数量，避免耗尽 SD/SPI 所需的片内 DMA 内存。
  * 函数具有幂等性：字体已经加载时直接返回之前创建的字体对象。
  */
 esp_err_t lvgl_font_load_ui(lv_font_t **font)

@@ -4,6 +4,7 @@
 #include "esp_err.h"
 #include "lvgl.h"
 
+/* FreeType 默认文件接口直接使用 ESP-IDF VFS 路径。 */
 #define LVGL_UI_FONT_FILE_PATH "/sdcard/font/font.ttf"
 #define LVGL_UI_FONT_PATH LVGL_UI_FONT_FILE_PATH
 

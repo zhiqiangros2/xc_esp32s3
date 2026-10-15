@@ -3,9 +3,9 @@
  * @brief 将 LVGL 自身的动态对象明确分配到 PSRAM。
  *
  * LVGL 9 的对象、样式、定时器、事件描述符和文本副本通常都是几百字节的小块。
- * 如果直接使用标准 malloc，这些分配会受到项目 4 KiB 内部优先阈值影响，最终
- * 把内部堆消耗到无法再创建任务控制块或驱动对象。本文件只替换 LVGL 的 core
- * allocator；FreeType 库仍使用标准 malloc/realloc/free，因此字体解析策略不变。
+ * 如果直接使用标准 malloc，这些分配仍可能持续消耗片内堆，最终无法再创建
+ * 任务控制块或驱动对象，因此 LVGL 核心分配全部固定到 PSRAM。FreeType 当前
+ * 使用标准 malloc，其中大于项目阈值的解析和缓存分配同样优先进入 PSRAM。
  *
  * 这里不提供内部 RAM 回退。PSRAM 不足时让 LVGL 收到 NULL 并按原有错误路径
  * 处理，不能为了创建界面而挤占 I2S DMA、I2C、SPI 和 FreeRTOS 所需内部内存。

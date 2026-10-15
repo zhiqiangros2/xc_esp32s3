@@ -58,6 +58,26 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.0.15
+  espressif/esp_tinyusb:
+    component_hash: cfb066b239957ebfba5f7a7764e534b3000d3b400fd42d11bedb6ee5e6eaf3c9
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    - name: espressif/tinyusb
+      registry_url: https://components.espressif.com
+      require: public
+      version: '>=0.17.0~2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    - esp32h4
+    - esp32s31
+    version: 2.4.0
   espressif/freetype:
     component_hash: aa9f7657a69b2b1c1f49044017fc424081d4e0fe6e97834cb43883548d44e3ca
     dependencies:
@@ -68,6 +88,22 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.14.3~1
+  espressif/tinyusb:
+    component_hash: 16c8d774dab1f484d3e0c0f61105624d2424bbae864efd19818baf7b451b41e7
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    - esp32h4
+    - esp32s31
+    version: 0.21.0~2
   idf:
     source:
       type: idf
@@ -117,9 +153,10 @@ direct_dependencies:
 - espressif/esp-dsp
 - espressif/esp-sr
 - espressif/esp32-camera
+- espressif/esp_tinyusb
 - espressif/freetype
 - joltwallet/littlefs
 - lvgl/lvgl
-manifest_hash: f3970bf21b0d2f5659cd6f11af21bc5d25335997aca4c12432d68bd3a0e9ab59
+manifest_hash: f2076fb13ee2f436ec6e883033b4d13a2e1e52ba072a887fd557e20485dba80e
 target: esp32s3
 version: 2.0.0

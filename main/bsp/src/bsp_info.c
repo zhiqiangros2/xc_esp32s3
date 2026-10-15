@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_chip_info.h"
 #include "esp_err.h"
@@ -17,6 +18,9 @@
 #define BSP_BYTES_PER_MIB (1024U * 1024U)
 
 static const char *TAG = "BOX3";
+
+static const char s_system_software_version[] = "10.5.1";
+static const char s_app_software_version[] = "0.0.1";
 
 /* 这些符号由 ESP-IDF 链接脚本提供，分别表示 Flash 映射代码和只读数据范围。 */
 extern const uint8_t _text_start[];
@@ -56,6 +60,45 @@ static bool bsp_test_psram(void)
 
     heap_caps_free(buffer);
     return true;
+}
+
+static bool bsp_parse_software_version(
+    const char *version,
+    uint8_t encoded[BSP_SOFTWARE_VERSION_SIZE])
+{
+    unsigned major = 0;
+    unsigned minor = 0;
+    unsigned patch = 0;
+    char trailing = '\0';
+
+    if (sscanf(version,
+               "%u.%u.%u%c",
+               &major,
+               &minor,
+               &patch,
+               &trailing) != 3 ||
+        major > UINT8_MAX || minor > UINT8_MAX || patch > UINT8_MAX) {
+        memset(encoded, 0, BSP_SOFTWARE_VERSION_SIZE);
+        return false;
+    }
+
+    encoded[0] = (uint8_t)patch;
+    encoded[1] = (uint8_t)minor;
+    encoded[2] = (uint8_t)major;
+    return true;
+}
+
+void bsp_info_get_software_versions(
+    uint8_t system_version[BSP_SOFTWARE_VERSION_SIZE],
+    uint8_t app_version[BSP_SOFTWARE_VERSION_SIZE])
+{
+    if (!bsp_parse_software_version(s_system_software_version,
+                                    system_version)) {
+        ESP_LOGE(TAG, "Invalid system software version");
+    }
+    if (!bsp_parse_software_version(s_app_software_version, app_version)) {
+        ESP_LOGE(TAG, "Invalid app software version");
+    }
 }
 
 void bsp_info_print(void)

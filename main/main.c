@@ -28,6 +28,7 @@
 #include "speech_recognition.h"
 #include "spi.h"
 #include "tp.h"
+#include "usb_uart.h"
 #include "wav_player.h"
 #include "wifi_manager.h"
 
@@ -35,7 +36,16 @@ static const char *TAG = "BOX3";
 
 void app_main(void)
 {
-    vTaskDelay(pdMS_TO_TICKS(10000));
+    /* GPIO19/20 的 TinyUSB CDC 只处理指令；系统日志继续由 UART0 输出。 */
+    const esp_err_t usb_uart_result = usb_uart_init();
+    if (usb_uart_result != ESP_OK) {
+        /* USB 指令通道故障不应阻止 WiFi、界面及其他整机功能继续启动。 */
+        ESP_LOGE(TAG,
+                 "TinyUSB CDC command channel unavailable; continuing: %s",
+                 esp_err_to_name(usb_uart_result));
+    }
+
+    //vTaskDelay(pdMS_TO_TICKS(10000));
 
     /* NVS 保存 WiFi 选择，并供无线控制器保存 PHY 校准等系统数据。 */
     esp_err_t err = nvs_flash_init();
